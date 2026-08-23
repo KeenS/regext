@@ -532,7 +532,6 @@ impl CfgParser {
     pub fn new(grammar: &str) -> Result<Self, CfgError> {
         let mut registry = GrammarRegistry::new();
         let mut start_symbol = None;
-        let mut terminals = HashSet::new();
         
         for prod_str in grammar.split(';') {
             let prod_str = prod_str.trim();
@@ -546,7 +545,6 @@ impl CfgParser {
                     start_symbol = Some(lhs.to_string());
                 }
                 
-                Self::collect_terminals(rhs, &mut terminals);
                 let expr = GrammarRegistry::expr(rhs);
                 registry.register(lhs, expr);
             } else {
@@ -555,18 +553,20 @@ impl CfgParser {
         }
         
         let start_sym = start_symbol.ok_or_else(|| CfgError { message: "No start symbol".to_string() })?;
+        // Terminals are the terminal symbols that actually occur in productions,
+        // so choice/sequence syntax like `abc|def` yields `abc` and `def`.
+        let terminals: HashSet<String> = registry
+            .productions
+            .iter()
+            .flat_map(|(_, rhs)| rhs.iter())
+            .filter_map(|sym| match sym {
+                Symbol::Terminal(t) => Some(t.clone()),
+                Symbol::NonTerminal(_) => None,
+            })
+            .collect();
         let table = LRCompiler::compile::<String>(&registry);
         
         Ok(Self { table, start_symbol: start_sym, terminals })
-    }
-    
-    fn collect_terminals(rhs: &str, terminals: &mut HashSet<String>) {
-        for token in rhs.split_whitespace() {
-            let token = token.trim_matches(|c| c == '\'' || c == '"');
-            if !token.is_empty() && !token.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                terminals.insert(token.to_string());
-            }
-        }
     }
 
     pub fn is_match(&self, text: &str) -> bool {
