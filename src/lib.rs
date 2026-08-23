@@ -2,6 +2,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::hash::Hash;
 
+pub mod lexer;
+
+pub use lexer::{Lexer, Token};
+
 // =============================================================================
 // Core Engine
 // =============================================================================
@@ -566,48 +570,20 @@ impl CfgParser {
     }
 
     pub fn is_match(&self, text: &str) -> bool {
-        let tokens = self.lex(text);
+        let lexer = Lexer::new(self.terminals.clone());
+        let symbols: Vec<String> = lexer
+            .tokenize(text)
+            .into_iter()
+            .filter_map(|token| match token {
+                Token::Terminal(symbol) => Some(symbol),
+                Token::EOF => None,
+            })
+            .collect();
         let mut engine = Engine::new(0);
-        match engine.run(&self.table, tokens.into_iter()) {
+        match engine.run(&self.table, symbols.into_iter()) {
             Ok(result) => result == self.start_symbol,
             Err(_) => false,
         }
-    }
-    
-    fn lex(&self, text: &str) -> Vec<String> {
-        let mut tokens = Vec::new();
-        let chars: Vec<char> = text.chars().collect();
-        let mut i = 0;
-        
-        while i < chars.len() {
-            let c = chars[i];
-            
-            if c.is_whitespace() {
-                i += 1;
-                continue;
-            }
-            
-            let mut matched = false;
-            for terminal in &self.terminals {
-                let term_len = terminal.chars().count();
-                if i + term_len <= chars.len() {
-                    let slice: String = chars[i..i+term_len].iter().collect();
-                    if slice == *terminal {
-                        tokens.push(slice);
-                        i += term_len;
-                        matched = true;
-                        break;
-                    }
-                }
-            }
-            
-            if !matched {
-                tokens.push(c.to_string());
-                i += 1;
-            }
-        }
-        
-        tokens
     }
 }
 

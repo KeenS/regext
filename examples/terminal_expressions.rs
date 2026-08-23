@@ -11,7 +11,7 @@ fn main() {
     println!("  F -> '(' E ')' | NUM\n");
     
     // Using character classes and repetition
-    let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2").unwrap();
+    let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2 | 3").unwrap();
     
     let tests = vec![
         ("1", true),
