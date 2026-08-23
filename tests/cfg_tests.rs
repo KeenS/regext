@@ -25,25 +25,26 @@ fn test_cfg_sequence() {
 
 #[test]
 fn test_cfg_multiple_productions() {
-    let parser = CfgParser::new("E -> E plus T | T; T -> t").unwrap();
+    let parser = CfgParser::new("E -> E + T | T; T -> t").unwrap();
     assert!(parser.is_match("t"));
 }
 
 #[test]
-fn test_cfg_nested() {
-    let parser = CfgParser::new("SExp -> lparen SExpList rparen | Atom; SExpList -> SExp SExpList | SExp; Atom -> foo | bar").unwrap();
+fn test_cfg_nested_with_parens() {
+    let parser = CfgParser::new("SExp -> ( SExpList ) | Atom; SExpList -> SExp SExpList | SExp; Atom -> foo | bar").unwrap();
     assert!(parser.is_match("foo"));
-    assert!(parser.is_match("lparen foo rparen"));
-    assert!(parser.is_match("lparen foo bar rparen"));
-    assert!(!parser.is_match("lparen foo"));
+    assert!(parser.is_match("( foo )"));
+    assert!(parser.is_match("( foo bar )"));
+    assert!(parser.is_match("( foo ( bar ) )"));
+    assert!(!parser.is_match("( foo"));
 }
 
 #[test]
-fn test_cfg_arithmetic() {
-    let parser = CfgParser::new("E -> E plus T | T; T -> T star F | F; F -> lparen E rparen | NUM; NUM -> 1 | 2").unwrap();
+fn test_cfg_arithmetic_with_parens() {
+    let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2").unwrap();
     assert!(parser.is_match("1"));
-    assert!(parser.is_match("1 plus 2"));
-    assert!(parser.is_match("1 star 2"));
-    assert!(parser.is_match("lparen 1 plus 2 rparen"));
-    assert!(!parser.is_match("1 plus"));
+    assert!(parser.is_match("1 + 2"));
+    assert!(parser.is_match("1 * 2"));
+    assert!(parser.is_match("( 1 + 2 )"));
+    assert!(!parser.is_match("1 +"));
 }

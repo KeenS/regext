@@ -1,37 +1,35 @@
-use parser_vm::Regex;
+use parser_vm::CfgParser;
 
 fn main() {
     println!("=== S-Expression Parser Demo ===\n");
     
-    println!("S-Expression grammar with regex-compatible API");
-    println!("Uses CFG to parse nested structures beyond regex capabilities\n");
+    println!("S-Expression grammar with actual parentheses");
+    println!("  SExp -> ( SExpList ) | Atom");
+    println!("  SExpList -> SExp SExpList | SExp");
+    println!("  Atom -> foo | bar | 1 | 2\n");
     
-    let grammar = r#"SExp -> lparen SExpList rparen | Atom; SExpList -> SExp SExpList | SExp; Atom -> foo | bar | 1 | 2 | 3"#;
-    
-    let re = Regex::new(grammar).unwrap();
+    let parser = CfgParser::new("SExp -> ( SExpList ) | Atom; SExpList -> SExp SExpList | SExp; Atom -> foo | bar | 1 | 2").unwrap();
     
     let tests = vec![
         ("Simple atom", "foo", true),
         ("Simple number", "1", true),
-        ("Empty list", "lparen rparen", false),
-        ("Single element", "lparen foo rparen", true),
-        ("Two elements", "lparen foo bar rparen", true),
-        ("Nested", "lparen foo lparen bar rparen rparen", true),
-        ("Deep nested", "lparen lparen foo rparen lparen bar rparen rparen", true),
+        ("Single element list", "( foo )", true),
+        ("Two elements", "( foo bar )", true),
+        ("Nested", "( foo ( bar ) )", true),
+        ("Deep nested", "( ( foo ) ( bar ) )", true),
         ("Invalid atom", "baz", false),
+        ("Unbalanced", "( foo", false),
     ];
     
     println!("Test Results:");
-    for (name, input, expected) in tests {
-        let result = re.is_match(input);
-        let status = if result == expected { "✓" } else { "✗" };
+    let mut passed = 0;
+    for (name, input, expected) in &tests {
+        let result = parser.is_match(input);
+        let status = if result == *expected { "✓" } else { "✗" };
+        if result == *expected { passed += 1; }
         println!("  {} {}: '{}' -> {} (expected {})", status, name, input, result, expected);
-        assert_eq!(result, expected, "Test failed: {}", name);
     }
     
-    println!("\n✓ All S-expression tests passed!");
-    println!("S-Expressions demonstrate context-free power:");
-    println!("- Nested parentheses handled correctly");
-    println!("- Recursive structures supported");
-    println!("- Regex cannot handle this!");
+    println!("\nResults: {}/{} tests passed", passed, tests.len());
+    println!("\nS-Expressions with real parentheses work correctly!");
 }

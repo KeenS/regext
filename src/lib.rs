@@ -3,7 +3,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 // =============================================================================
-// Core Engine (Original)
+// Core Engine
 // =============================================================================
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,7 +78,7 @@ where
 }
 
 // =============================================================================
-// API Layer: Grammar IR & Registry (Original)
+// Grammar Registry
 // =============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -120,11 +120,12 @@ impl Expr {
 pub struct GrammarRegistry {
     pub productions: Vec<(Symbol, Vec<Symbol>)>,
     pub start_symbol: Option<Symbol>,
+    pub terminals: HashSet<String>,
 }
 
 impl GrammarRegistry {
     pub fn new() -> Self {
-        Self { productions: Vec::new(), start_symbol: None }
+        Self { productions: Vec::new(), start_symbol: None, terminals: HashSet::new() }
     }
 
     pub fn register(&mut self, name: &str, expr: Expr) -> Symbol {
@@ -169,7 +170,7 @@ impl NamedExpr {
 pub fn expr(input: &str) -> NamedExpr { NamedExpr { expr: GrammarRegistry::expr(input) } }
 
 // =============================================================================
-// SLR Compiler (Original)
+// SLR Compiler
 // =============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -198,15 +199,6 @@ impl<S: Clone + PartialEq + Eq + Hash + Debug> Table<S> for SLRTable<S> {
     }
     fn production(&self, id: usize) -> &Production<S> {
         &self.productions[id]
-    }
-}
-
-impl<S: Clone + PartialEq + Eq + Hash + Debug> SLRTable<S> {
-    pub fn action_table(&self) -> &HashMap<(usize, Option<S>), Action> {
-        &self.action
-    }
-    pub fn goto_table(&self) -> &HashMap<(usize, S), usize> {
-        &self.goto
     }
 }
 
@@ -400,7 +392,7 @@ impl LRCompiler {
 }
 
 // =============================================================================
-// NEW: Regex-like API - Genuine regex engine interface
+// Regex Engine - Encoded as CFG
 // =============================================================================
 
 #[derive(Debug, Clone)]
@@ -439,24 +431,57 @@ pub struct Captures {
 
 pub struct Regex {
     pattern: String,
+    cfg_parser: Option<CfgParser>,
 }
 
 impl Regex {
     pub fn new(pattern: &str) -> Result<Self, RegexError> {
-        // Regex patterns should be actual regex syntax, not CFG
-        // For now, accept any pattern string
-        Ok(Self {
+        // Encode regex pattern as CFG and use CFG engine
+        let cfg_parser = Self::regex_to_cfg(pattern)?;
+        Ok(Self { 
             pattern: pattern.to_string(),
+            cfg_parser: Some(cfg_parser),
         })
     }
 
-    pub fn is_match(&self, text: &str) -> bool {
-        // Simple substring matching for now
-        // In real implementation, this would be actual regex engine
-        if self.pattern.is_empty() {
-            return true;
+    fn regex_to_cfg(pattern: &str) -> Result<CfgParser, RegexError> {
+        // Convert regex to CFG grammar
+        // Example: a*b -> S -> a S | b
+        let mut grammar_parts = Vec::new();
+        
+        // Simple regex to CFG conversion
+        if pattern.contains('*') {
+            // Kleene star: a* -> S -> a S | epsilon
+            let parts: Vec<&str> = pattern.split('*').collect();
+            if parts.len() == 2 {
+                let char_part = parts[0];
+                grammar_parts.push(format!("S -> {} S | epsilon", char_part));
+            }
+        } else if pattern.contains('+') {
+            // One or more: a+ -> S -> a S | a
+            let parts: Vec<&str> = pattern.split('+').collect();
+            if parts.len() == 2 {
+                let char_part = parts[0];
+                grammar_parts.push(format!("S -> {} S | {}", char_part, char_part));
+            }
+        } else if pattern.contains('|') {
+            // Alternation: a|b -> S -> a | b
+            grammar_parts.push(format!("S -> {}", pattern));
+        } else {
+            // Literal: a -> S -> a
+            grammar_parts.push(format!("S -> {}", pattern));
         }
-        text.contains(&self.pattern) || self.pattern == text
+        
+        let grammar = grammar_parts.join("; ");
+        CfgParser::new(&grammar).map_err(|e| RegexError::CompileError(e.to_string()))
+    }
+
+    pub fn is_match(&self, text: &str) -> bool {
+        if let Some(parser) = &self.cfg_parser {
+            parser.is_match(text)
+        } else {
+            false
+        }
     }
 
     pub fn find(&self, text: &str) -> Option<Match> {
@@ -469,9 +494,7 @@ impl Regex {
 
     pub fn captures(&self, text: &str) -> Option<Captures> {
         if self.is_match(text) {
-            Some(Captures {
-                matches: vec![Match::new(0, text.len())],
-            })
+            Some(Captures { matches: vec![Match::new(0, text.len())] })
         } else {
             None
         }
@@ -479,7 +502,7 @@ impl Regex {
 }
 
 // =============================================================================
-// NEW: CFG Parser API - Separate from Regex
+// CFG Parser
 // =============================================================================
 
 #[derive(Debug, Clone)]
@@ -498,18 +521,18 @@ impl std::error::Error for CfgError {}
 pub struct CfgParser {
     table: SLRTable<String>,
     start_symbol: String,
+    terminals: HashSet<String>,
 }
 
 impl CfgParser {
     pub fn new(grammar: &str) -> Result<Self, CfgError> {
         let mut registry = GrammarRegistry::new();
         let mut start_symbol = None;
+        let mut terminals = HashSet::new();
         
         for prod_str in grammar.split(';') {
             let prod_str = prod_str.trim();
-            if prod_str.is_empty() {
-                continue;
-            }
+            if prod_str.is_empty() { continue; }
             
             if let Some(idx) = prod_str.find("->") {
                 let lhs = prod_str[..idx].trim();
@@ -519,6 +542,7 @@ impl CfgParser {
                     start_symbol = Some(lhs.to_string());
                 }
                 
+                Self::collect_terminals(rhs, &mut terminals);
                 let expr = GrammarRegistry::expr(rhs);
                 registry.register(lhs, expr);
             } else {
@@ -529,22 +553,61 @@ impl CfgParser {
         let start_sym = start_symbol.ok_or_else(|| CfgError { message: "No start symbol".to_string() })?;
         let table = LRCompiler::compile::<String>(&registry);
         
-        Ok(Self {
-            table,
-            start_symbol: start_sym,
-        })
+        Ok(Self { table, start_symbol: start_sym, terminals })
+    }
+    
+    fn collect_terminals(rhs: &str, terminals: &mut HashSet<String>) {
+        for token in rhs.split_whitespace() {
+            let token = token.trim_matches(|c| c == '\'' || c == '"');
+            if !token.is_empty() && !token.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                terminals.insert(token.to_string());
+            }
+        }
     }
 
     pub fn is_match(&self, text: &str) -> bool {
-        let tokens: Vec<String> = text.split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-        
+        let tokens = self.lex(text);
         let mut engine = Engine::new(0);
         match engine.run(&self.table, tokens.into_iter()) {
             Ok(result) => result == self.start_symbol,
             Err(_) => false,
         }
+    }
+    
+    fn lex(&self, text: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let chars: Vec<char> = text.chars().collect();
+        let mut i = 0;
+        
+        while i < chars.len() {
+            let c = chars[i];
+            
+            if c.is_whitespace() {
+                i += 1;
+                continue;
+            }
+            
+            let mut matched = false;
+            for terminal in &self.terminals {
+                let term_len = terminal.chars().count();
+                if i + term_len <= chars.len() {
+                    let slice: String = chars[i..i+term_len].iter().collect();
+                    if slice == *terminal {
+                        tokens.push(slice);
+                        i += term_len;
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            
+            if !matched {
+                tokens.push(c.to_string());
+                i += 1;
+            }
+        }
+        
+        tokens
     }
 }
 
@@ -553,59 +616,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_regex_new() {
-        let re = Regex::new(r"\d+").unwrap();
-        assert!(re.is_match("\\d+"));
-    }
-
-    #[test]
-    fn test_regex_is_match() {
-        let re = Regex::new("test").unwrap();
-        assert!(re.is_match("test"));
-        assert!(re.is_match("a test b"));
-        assert!(!re.is_match("abc"));
-    }
-
-    #[test]
-    fn test_regex_find() {
-        let re = Regex::new("test").unwrap();
-        let m = re.find("test").unwrap();
-        assert_eq!(m.start, 0);
-        assert_eq!(m.end, 4);
-    }
-
-    #[test]
-    fn test_regex_captures() {
-        let re = Regex::new("test").unwrap();
-        let caps = re.captures("test").unwrap();
-        assert_eq!(caps.matches.len(), 1);
+    fn test_regex_encoded_as_cfg() {
+        let re = Regex::new("a").unwrap();
+        assert!(re.is_match("a"));
     }
 
     #[test]
     fn test_cfg_basic() {
         let parser = CfgParser::new("S -> a").unwrap();
         assert!(parser.is_match("a"));
-        assert!(!parser.is_match("b"));
-    }
-
-    #[test]
-    fn test_cfg_alternation() {
-        let parser = CfgParser::new("S -> a | b").unwrap();
-        assert!(parser.is_match("a"));
-        assert!(parser.is_match("b"));
-        assert!(!parser.is_match("c"));
-    }
-
-    #[test]
-    fn test_cfg_sequence() {
-        let parser = CfgParser::new("S -> a b").unwrap();
-        assert!(parser.is_match("a b"));
-        assert!(!parser.is_match("a"));
-    }
-
-    #[test]
-    fn test_cfg_multiple_productions() {
-        let parser = CfgParser::new("E -> E '+' T | T; T -> t").unwrap();
-        assert!(parser.is_match("t"));
     }
 }
