@@ -1,31 +1,21 @@
 use parser_vm::CfgParser;
 
+fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
+    let result = parser.is_match(input);
+    assert_eq!(result, expected, "[{}] input '{}': expected {}", name, input, expected);
+}
+
 fn main() {
-    println!("=== Terminal Expressions Demo ===\n");
-    
-    println!("CFG with terminal expressions:");
-    println!("  NUM -> [0-9]+");
-    println!("  WORD -> [a-z]+");
-    println!("  E -> E '+' T | T");
-    println!("  T -> T '*' F | F");
-    println!("  F -> '(' E ')' | NUM\n");
-    
-    // Using character classes and repetition
+    // E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2 | 3
     let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2 | 3").unwrap();
-    
-    let tests = vec![
-        ("1", true),
-        ("1 + 2", true),
-        ("1 * 2", true),
-        ("( 1 + 2 )", true),
-        ("1 + 2 * 3", true),
-    ];
-    
-    for (input, expected) in tests {
-        let result = parser.is_match(input);
-        let status = if result == expected { "✓" } else { "✗" };
-        println!("  {} '{}' -> {}", status, input, result);
-    }
-    
-    println!("\nTerminal expressions [chars] and * + support planned");
+
+    check(&parser, "number", "1", true);
+    check(&parser, "add", "1 + 2", true);
+    check(&parser, "mul", "1 * 2", true);
+    check(&parser, "parens", "( 1 + 2 )", true);
+    check(&parser, "precedence", "1 + 2 * 3", true);
+    check(&parser, "number out of range", "7", false);
+    check(&parser, "trailing operator", "1 +", false);
+
+    println!("terminal_expressions: 7 assertions passed");
 }

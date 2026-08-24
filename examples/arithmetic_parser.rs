@@ -1,37 +1,23 @@
 use parser_vm::CfgParser;
 
+fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
+    let result = parser.is_match(input);
+    assert_eq!(result, expected, "[{}] input '{}': expected {}", name, input, expected);
+}
+
 fn main() {
-    println!("=== Arithmetic Expression Parser Demo ===\n");
-    
-    println!("Arithmetic grammar with actual operators");
-    println!("  E -> E + T | T");
-    println!("  T -> T * F | F");
-    println!("  F -> ( E ) | NUM");
-    println!("  NUM -> 1 | 2 | 3 | 4 | 5\n");
-    
+    // Arithmetic grammar with real operators and precedence
     let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2 | 3 | 4 | 5").unwrap();
-    
-    let tests = vec![
-        ("Number", "1", true),
-        ("Addition", "1 + 2", true),
-        ("Multiplication", "2 * 3", true),
-        ("Mixed", "1 + 2 * 3", true),
-        ("Parentheses", "( 1 + 2 )", true),
-        ("Complex", "1 + 2 * 3 + 4", true),
-        ("Nested parens", "( ( 1 + 2 ) * 3 )", true),
-        ("Invalid", "1 +", false),
-        ("Invalid op", "1 ? 2", false),
-    ];
-    
-    println!("Test Results:");
-    let mut passed = 0;
-    for (name, input, expected) in &tests {
-        let result = parser.is_match(input);
-        let status = if result == *expected { "✓" } else { "✗" };
-        if result == *expected { passed += 1; }
-        println!("  {} {}: '{}' -> {} (expected {})", status, name, input, result, expected);
-    }
-    
-    println!("\nResults: {}/{} tests passed", passed, tests.len());
-    println!("\nArithmetic parser with real operators and parentheses!");
+
+    check(&parser, "number", "1", true);
+    check(&parser, "addition", "1 + 2", true);
+    check(&parser, "multiplication", "2 * 3", true);
+    check(&parser, "precedence", "1 + 2 * 3", true);
+    check(&parser, "parentheses", "( 1 + 2 )", true);
+    check(&parser, "complex", "1 + 2 * 3 + 4", true);
+    check(&parser, "nested parentheses", "( ( 1 + 2 ) * 3 )", true);
+    check(&parser, "trailing operator", "1 +", false);
+    check(&parser, "unknown operator", "1 ? 2", false);
+
+    println!("arithmetic_parser: 9 assertions passed");
 }

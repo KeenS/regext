@@ -1,26 +1,18 @@
 use parser_vm::CfgParser;
 
+fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
+    let result = parser.is_match(input);
+    assert_eq!(result, expected, "[{}] input '{}': expected {}", name, input, expected);
+}
+
 fn main() {
-    println!("=== No Spaces Required Demo ===\n");
-    
-    // Grammar with terminals that don't require spaces
+    // The lexer splits input without requiring spaces between tokens
     let parser = CfgParser::new("S -> ( S ) | a").unwrap();
-    
-    println!("Grammar: S -> ( S ) | a");
-    println!("Testing without spaces:\n");
-    
-    let tests = vec![
-        ("a", true),
-        ("(a)", true),
-        ("((a))", true),
-        ("(a)(a)", false), // Should fail - needs space or proper grammar
-    ];
-    
-    for (input, expected) in tests {
-        let result = parser.is_match(input);
-        let status = if result == expected { "✓" } else { "✗" };
-        println!("  {} '{}' -> {} (expected {})", status, input, result, expected);
-    }
-    
-    println!("\nLexer should handle input without spaces");
+
+    check(&parser, "atom", "a", true);
+    check(&parser, "single parens", "(a)", true);
+    check(&parser, "double parens", "((a))", true);
+    check(&parser, "concatenated lists", "(a)(a)", false);
+
+    println!("no_spaces_demo: 4 assertions passed");
 }

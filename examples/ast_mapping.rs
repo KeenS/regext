@@ -1,4 +1,4 @@
-use parser_vm::{GrammarRegistry, LRCompiler, Engine, expr};
+use parser_vm::{Engine, GrammarRegistry, LRCompiler, expr};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Arith {
@@ -8,28 +8,23 @@ enum Arith {
 }
 
 fn main() {
-    println!("=== AST Mapping Demo ===\n");
-    
-    println!("Parsing arithmetic expressions to AST\n");
-    
+    // Registration order matters: the first non-terminal is the start symbol.
     let mut registry = GrammarRegistry::new();
-    
-    // Build grammar with AST mapping
-    let _num = expr("1 | 2 | 3").named("NUM", &mut registry);
-    let _f = expr("( E ) | NUM").named("F", &mut registry);
-    let _t = expr("T * F | F").named("T", &mut registry);
     let _e = expr("E + T | T").named("E", &mut registry);
-    
+    let _t = expr("T * F | F").named("T", &mut registry);
+    let _f = expr("( E ) | NUM").named("F", &mut registry);
+    let _num = expr("1 | 2 | 3").named("NUM", &mut registry);
+
     let table = LRCompiler::compile::<String>(&registry);
     let mut engine = Engine::new(0);
-    
+
     let input = vec!["1".to_string(), "+".to_string(), "2".to_string()];
     let result = engine.run(&table, input);
-    
-    println!("Input: 1 + 2");
-    println!("Parse result: {:?}", result.is_ok());
-    println!("AST mapping would convert parse tree to Rust data structures");
-    
-    println!("\nAST example:");
-    println!("  Plus(Box::new(Num(1)), Box::new(Num(2)))");
+    assert_eq!(result.as_deref(), Ok("E"), "'1 + 2' must parse to the start symbol");
+
+    // Goal of AST mapping (roadmap): reduce the parse to a Rust data structure.
+    let expected = Arith::Plus(Box::new(Arith::Num(1)), Box::new(Arith::Num(2)));
+    let mult_example = Arith::Mult(Box::new(Arith::Num(2)), Box::new(Arith::Num(3)));
+    println!("ast_mapping: 1 assertion passed; target AST for '1 + 2': {:#?}", expected);
+    println!("ast_mapping: target AST for '2 * 3': {:#?}", mult_example);
 }

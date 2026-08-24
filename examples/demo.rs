@@ -1,11 +1,11 @@
-use parser_vm::*;
+use parser_vm::{Engine, GrammarRegistry, LRCompiler, SLRTable, Symbol, expr};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum MySymbol {
     S, E, T, F,
     LPar, RPar, Plus, Mult, Num,
-    S_Prime, E_Prime, T_Prime, F_Prime,
-    EOF,
+    SPrime, EPrime, TPrime, FPrime,
+    Eof,
 }
 
 impl From<Symbol> for MySymbol {
@@ -17,7 +17,7 @@ impl From<Symbol> for MySymbol {
                 "+" => MySymbol::Plus,
                 "*" => MySymbol::Mult,
                 "n" => MySymbol::Num,
-                "EOF" => MySymbol::EOF,
+                "EOF" => MySymbol::Eof,
                 _ => panic!("Unknown terminal: {}", t),
             },
             Symbol::NonTerminal(n) => match n.as_str() {
@@ -25,48 +25,52 @@ impl From<Symbol> for MySymbol {
                 "E" => MySymbol::E,
                 "T" => MySymbol::T,
                 "F" => MySymbol::F,
-                "S_prime" => MySymbol::S_Prime,
-                "E_prime" => MySymbol::E_Prime,
-                "T_prime" => MySymbol::T_Prime,
-                "F_prime" => MySymbol::F_Prime,
+                "S_prime" => MySymbol::SPrime,
+                "E_prime" => MySymbol::EPrime,
+                "T_prime" => MySymbol::TPrime,
+                "F_prime" => MySymbol::FPrime,
                 _ => panic!("Unknown non-terminal: {}", n),
             },
         }
     }
 }
 
-fn test_parser(name: &str, reg: &GrammarRegistry, input: Vec<MySymbol>) {
-    let table = LRCompiler::compile::<MySymbol>(reg);
+fn run(table: &SLRTable<MySymbol>, input: Vec<MySymbol>) -> Result<MySymbol, String> {
     let mut engine = Engine::new(0);
-    println!("Testing {}: input {:?}", name, input);
-    match engine.run(&table, input) {
-        Ok(res) => println!("Result: Success! -> {:?}", res),
-        Err(e) => println!("Result: Error -> {}", e),
-    }
-    println!();
+    engine.run(table, input)
 }
 
 fn main() {
-    // 1. Balanced Parentheses: S -> ( S ) S | epsilon
+    // 1. Balanced parentheses: S -> ( S ) S | epsilon
     let mut reg_paren = GrammarRegistry::new();
     expr("( S ) S").named("S", &mut reg_paren);
     expr("epsilon").named("S", &mut reg_paren);
-    
+
+    let table = LRCompiler::compile::<MySymbol>(&reg_paren);
     let paren_input = vec![
-        MySymbol::LPar, MySymbol::LPar, MySymbol::RPar, MySymbol::LPar, MySymbol::RPar, 
-        MySymbol::LPar, MySymbol::LPar, MySymbol::LPar, MySymbol::RPar, MySymbol::RPar, MySymbol::RPar, MySymbol::RPar
+        MySymbol::LPar, MySymbol::LPar, MySymbol::RPar, MySymbol::LPar, MySymbol::RPar,
+        MySymbol::LPar, MySymbol::LPar, MySymbol::LPar, MySymbol::RPar, MySymbol::RPar, MySymbol::RPar, MySymbol::RPar,
     ];
-    test_parser("Parentheses", &reg_paren, paren_input);
+    assert_eq!(run(&table, paren_input).as_ref(), Ok(&MySymbol::S), "balanced parens must parse");
+
+    let table = LRCompiler::compile::<MySymbol>(&reg_paren);
+    assert!(
+        run(&table, vec![MySymbol::LPar, MySymbol::LPar]).is_err(),
+        "unbalanced parens must be rejected"
+    );
 
     // 2. Arithmetic: E -> E + T | T; T -> T * F | F; F -> ( E ) | n
     let mut reg_math = GrammarRegistry::new();
     expr("E + T | T").named("E", &mut reg_math);
     expr("T * F | F").named("T", &mut reg_math);
     expr("( E ) | n").named("F", &mut reg_math);
-    
+
+    let table = LRCompiler::compile::<MySymbol>(&reg_math);
     let math_input = vec![
-        MySymbol::Num, MySymbol::Plus, MySymbol::Num, MySymbol::Mult, 
-        MySymbol::LPar, MySymbol::Num, MySymbol::RPar
+        MySymbol::Num, MySymbol::Plus, MySymbol::Num, MySymbol::Mult,
+        MySymbol::LPar, MySymbol::Num, MySymbol::RPar,
     ];
-    test_parser("Arithmetic", &reg_math, math_input);
+    assert_eq!(run(&table, math_input).as_ref(), Ok(&MySymbol::E), "'n + n * ( n )' must parse");
+
+    println!("demo: 3 assertions passed");
 }

@@ -1,63 +1,48 @@
-use parser_vm::{GrammarRegistry, LRCompiler, Engine, expr};
+use parser_vm::{Engine, GrammarRegistry, LRCompiler, SLRTable, expr};
+
+fn run(table: &SLRTable<String>, input: Vec<String>) -> Result<String, String> {
+    let mut engine = Engine::new(0);
+    engine.run(table, input)
+}
 
 fn main() {
-    println!("=== Named API Demo ===\n");
-    
-    println!("Using expr().named() API for building grammars\n");
-    
-    // Example 1: Simple grammar
-    println!("1. Simple grammar with named API:");
+    // 1. Simple grammar: the first registered non-terminal is the start symbol
     let mut registry = GrammarRegistry::new();
     let _s = expr("a | b").named("S", &mut registry);
-    
+
     let table = LRCompiler::compile::<String>(&registry);
-    let mut engine = Engine::new(0);
-    let result = engine.run(&table, vec!["a".to_string()]);
-    println!("   S -> a | b");
-    println!("   Parse 'a': {:?}", result.is_ok());
-    
-    // Example 2: Nested grammar
-    println!("\n2. Nested grammar:");
+    assert_eq!(run(&table, vec!["a".to_string()]).as_deref(), Ok("S"), "S -> a");
+    assert_eq!(run(&table, vec!["b".to_string()]).as_deref(), Ok("S"), "S -> b");
+
+    // 2. Nested grammar: S -> A B; A -> a | b; B -> c | d
     let mut registry = GrammarRegistry::new();
     let _s = expr("A B").named("S", &mut registry);
     let _a = expr("a | b").named("A", &mut registry);
     let _b = expr("c | d").named("B", &mut registry);
-    
+
     let table = LRCompiler::compile::<String>(&registry);
-    let mut engine = Engine::new(0);
-    let tests = vec![
-        (vec!["a".to_string(), "c".to_string()], true),
-        (vec!["b".to_string(), "d".to_string()], true),
-        (vec!["a".to_string(), "x".to_string()], false),
-    ];
-    
-    for (input, expected) in tests {
-        let result = engine.run(&table, input.clone());
-        let status = if result.is_ok() == expected { "✓" } else { "✗" };
-        println!("   {} {:?} -> {}", status, input, result.is_ok());
-    }
-    
-    // Example 3: Arithmetic
-    println!("\n3. Arithmetic grammar:");
+    assert_eq!(run(&table, vec!["a".to_string(), "c".to_string()]).as_deref(), Ok("S"), "A=a B=c");
+    assert_eq!(run(&table, vec!["b".to_string(), "d".to_string()]).as_deref(), Ok("S"), "A=b B=d");
+    assert!(run(&table, vec!["a".to_string(), "x".to_string()]).is_err(), "unknown B must be rejected");
+
+    // 3. Arithmetic grammar with symbolic terminals
     let mut registry = GrammarRegistry::new();
     let _e = expr("E plus T | T").named("E", &mut registry);
     let _t = expr("T star F | F").named("T", &mut registry);
     let _f = expr("lparen E rparen | num").named("F", &mut registry);
-    
+
     let table = LRCompiler::compile::<String>(&registry);
-    let mut engine = Engine::new(0);
-    let tests = vec![
-        (vec!["num".to_string()], true),
-        (vec!["num".to_string(), "plus".to_string(), "num".to_string()], true),
-        (vec!["lparen".to_string(), "num".to_string(), "rparen".to_string()], true),
-    ];
-    
-    for (input, expected) in tests {
-        let result = engine.run(&table, input.clone());
-        let status = if result.is_ok() == expected { "✓" } else { "✗" };
-        println!("   {} {:?} -> {}", status, input, result.is_ok());
-    }
-    
-    println!("\nNamed API provides fluent builder pattern for grammars");
-    println!("Order matters: first registered non-terminal becomes start symbol");
+    assert_eq!(run(&table, vec!["num".to_string()]).as_deref(), Ok("E"), "single num");
+    assert_eq!(
+        run(&table, vec!["num".to_string(), "plus".to_string(), "num".to_string()]).as_deref(),
+        Ok("E"),
+        "num plus num"
+    );
+    assert_eq!(
+        run(&table, vec!["lparen".to_string(), "num".to_string(), "rparen".to_string()]).as_deref(),
+        Ok("E"),
+        "lparen num rparen"
+    );
+
+    println!("named_api_demo: 7 assertions passed");
 }

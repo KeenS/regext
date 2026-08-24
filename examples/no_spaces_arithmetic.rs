@@ -1,26 +1,20 @@
 use parser_vm::CfgParser;
 
+fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
+    let result = parser.is_match(input);
+    assert_eq!(result, expected, "[{}] input '{}': expected {}", name, input, expected);
+}
+
 fn main() {
-    println!("=== Arithmetic Without Spaces ===\n");
-    
+    // No spaces needed between tokens
     let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | num").unwrap();
-    
-    println!("Grammar: E -> E + T | T; T -> T * F | F; F -> ( E ) | num\n");
-    
-    let tests = vec![
-        ("num", true),
-        ("num+num", true),
-        ("num*num", true),
-        ("(num+num)", true),
-        ("num+num*num", true),
-        ("(num+num)*num", true),
-    ];
-    
-    for (input, expected) in tests {
-        let result = parser.is_match(input);
-        let status = if result == expected { "✓" } else { "✗" };
-        println!("  {} '{}' -> {} (expected {})", status, input, result, expected);
-    }
-    
-    println!("\nNo spaces needed between tokens!");
+
+    check(&parser, "number", "num", true);
+    check(&parser, "add", "num+num", true);
+    check(&parser, "mul", "num*num", true);
+    check(&parser, "parens", "(num+num)", true);
+    check(&parser, "mixed", "num+num*num", true);
+    check(&parser, "parens mul", "(num+num)*num", true);
+
+    println!("no_spaces_arithmetic: 6 assertions passed");
 }

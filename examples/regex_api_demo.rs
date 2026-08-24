@@ -1,34 +1,25 @@
-use parser_vm::Regex;
+use parser_vm::{CfgParser, Regex};
 
 fn main() {
-    println!("=== Regex API Compatibility Demo ===\n");
-    
-    // Simple regex mode
-    println!("1. Simple regex mode (backwards compatible):");
-    let re = Regex::new(r"test").unwrap();
-    println!("   Pattern: test");
-    println!("   is_match('test'): {}", re.is_match("test"));
-    println!("   is_match('a test b'): {}", re.is_match("a test b"));
-    println!("   is_match('abc'): {}", re.is_match("abc"));
-    println!("   find('a test b'): {:?}", re.find("a test b"));
-    println!();
-    
-    // CFG mode
-    println!("2. CFG mode (extended):");
-    let re = Regex::new(r"E -> E '+' NUM | NUM; NUM -> digit").unwrap();
-    println!("   Pattern: E -> E '+' NUM | NUM; NUM -> digit");
-    println!("   is_match('digit'): {}", re.is_match("digit"));
-    println!("   is_match('digit + digit'): {}", re.is_match("digit + digit"));
-    println!("   is_match('digit +'): {}", re.is_match("digit +"));
-    println!();
-    
-    // Captures
-    println!("3. Captures:");
-    let re = Regex::new(r"hello").unwrap();
-    if let Some(caps) = re.captures("hello world") {
-        println!("   captures('hello world'): {:?}", caps.matches);
-    }
-    println!();
-    
-    println!("=== API is upward compatible with regex crate ===");
+    // 1. Regex literals (whole-input matching)
+    let re = Regex::new("test").unwrap();
+    assert!(re.is_match("test"), "exact match");
+    assert!(!re.is_match("a test b"), "whole-input semantics: substring must not match");
+    assert!(!re.is_match("abc"), "non-match");
+    assert!(re.find("a test b").is_none(), "find returns None without a full match");
+    assert_eq!(re.find("test").map(|m| (m.start, m.end)), Some((0, 4)), "find span");
+
+    // 2. Context-free mode: grammars go through CfgParser, which handles recursion
+    let parser = CfgParser::new("E -> E + NUM | NUM; NUM -> digit").unwrap();
+    assert!(parser.is_match("digit"), "single NUM");
+    assert!(parser.is_match("digit + digit"), "recursive E");
+    assert!(!parser.is_match("digit +"), "trailing operator must be rejected");
+
+    // 3. Captures
+    let re = Regex::new("hello").unwrap();
+    let caps = re.captures("hello").expect("captures on match");
+    assert_eq!(caps.matches.len(), 1, "capture count");
+    assert!(re.captures("hello world").is_none(), "whole-input semantics: no capture on partial");
+
+    println!("regex_api_demo: 8 assertions passed");
 }
