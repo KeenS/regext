@@ -146,22 +146,32 @@ impl GrammarRegistry {
     }
 
     pub fn expr(input: &str) -> Expr {
-        if input.contains('|') {
-            let choices = input.split('|').map(|s| Self::expr(s.trim())).collect();
-            Expr::Choice(choices)
-        } else if input.contains(' ') {
-            let parts = input.split_whitespace().map(|s| Self::expr(s)).collect();
-            Expr::Sequence(parts)
-        } else if input == "epsilon" {
-            Expr::Empty
-        } else {
-            let first_char = input.chars().next().unwrap();
-            if first_char.is_uppercase() {
-                Expr::NonTerminal(input.to_string())
-            } else {
-                Expr::Terminal(input.to_string())
-            }
+        let t = input.trim();
+        // A quoted token ("...") is a terminal. Its content is the pattern:
+        //   "any"      -> any double-quoted string (matched as one unit)
+        //   [..]/[..]+ -> character class (optionally a maximal-munch run)
+        //   anything   -> an as-is literal
+        // An unquoted token is a non-terminal (the old case convention is gone).
+        if t.len() >= 2
+            && t.starts_with('"')
+            && t.ends_with('"')
+            && !t[1..t.len() - 1].contains('"')
+        {
+            let content: String = t.chars().skip(1).take(t.chars().count() - 2).collect();
+            return Expr::Terminal(content);
         }
+        if t.contains('|') {
+            let choices = t.split('|').map(|s| Self::expr(s.trim())).collect();
+            return Expr::Choice(choices);
+        }
+        if t.contains(' ') {
+            let parts = t.split_whitespace().map(|s| Self::expr(s)).collect();
+            return Expr::Sequence(parts);
+        }
+        if t == "epsilon" {
+            return Expr::Empty;
+        }
+        Expr::NonTerminal(t.to_string())
     }
 }
 
@@ -448,32 +458,39 @@ impl Regex {
         })
     }
 
+    fn quote(t: &str) -> String {
+        format!("\"{}\"", t)
+    }
+
     fn regex_to_cfg(pattern: &str) -> Result<CfgParser, RegexError> {
-        // Convert regex to CFG grammar
-        // Example: a*b -> S -> a S | b
+        // Convert regex to CFG grammar. Terminals are quoted, e.g.:
+        //   a*   -> S -> "a" S | epsilon
+        //   a+   -> S -> "a" S | "a"
+        //   a|b  -> S -> "a" | "b"
+        //   ab   -> S -> "ab"
         let mut grammar_parts = Vec::new();
         
-        // Simple regex to CFG conversion
         if pattern.contains('*') {
-            // Kleene star: a* -> S -> a S | epsilon
             let parts: Vec<&str> = pattern.split('*').collect();
             if parts.len() == 2 {
-                let char_part = parts[0];
+                let char_part = Self::quote(parts[0].trim());
                 grammar_parts.push(format!("S -> {} S | epsilon", char_part));
             }
         } else if pattern.contains('+') {
-            // One or more: a+ -> S -> a S | a
             let parts: Vec<&str> = pattern.split('+').collect();
             if parts.len() == 2 {
-                let char_part = parts[0];
+                let char_part = Self::quote(parts[0].trim());
                 grammar_parts.push(format!("S -> {} S | {}", char_part, char_part));
             }
         } else if pattern.contains('|') {
-            // Alternation: a|b -> S -> a | b
-            grammar_parts.push(format!("S -> {}", pattern));
+            let alts = pattern
+                .split('|')
+                .map(|p| Self::quote(p.trim()))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            grammar_parts.push(format!("S -> {}", alts));
         } else {
-            // Literal: a -> S -> a
-            grammar_parts.push(format!("S -> {}", pattern));
+            grammar_parts.push(format!("S -> {}", Self::quote(pattern.trim())));
         }
         
         let grammar = grammar_parts.join("; ");
@@ -597,9 +614,28 @@ mod tests {
         assert!(re.is_match("a"));
     }
 
+#[test]
+    fn zz_debug_terminals() {
+        let p = CfgParser::new(r#"S -> "[1-5]""#).unwrap();
+        eprintln!("terminals: {:?}", p.terminals);
+        let lexer = Lexer::new(p.terminals.clone());
+        eprintln!("tokens: {:?}", lexer.tokenize("3"));
+        let symbols: Vec<String> = lexer
+            .tokenize("3")
+            .into_iter()
+            .filter_map(|t| match t { Token::Terminal(s) => Some(s), Token::EOF => None })
+            .collect();
+        for s in &symbols {
+            eprintln!("action(0, {:?}) = {:?}", s, p.table.action(0, Some(s)));
+        }
+        let mut engine = Engine::new(0);
+        eprintln!("run: {:?}", engine.run(&p.table, symbols));
+        eprintln!("start: {:?}", p.start_symbol);
+    }
+
     #[test]
     fn test_cfg_basic() {
-        let parser = CfgParser::new("S -> a").unwrap();
+        let parser = CfgParser::new(r#"S -> "a""#).unwrap();
         assert!(parser.is_match("a"));
     }
 }

@@ -6,8 +6,9 @@ fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
 }
 
 fn main() {
-    // E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2 | 3
-    let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2 | 3").unwrap();
+    let parser = CfgParser::new(
+        r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | NUM; NUM -> "1" | "2" | "3""#,
+    ).unwrap();
 
     check(&parser, "number", "1", true);
     check(&parser, "add", "1 + 2", true);

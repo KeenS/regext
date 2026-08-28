@@ -6,8 +6,10 @@ fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
 }
 
 fn main() {
-    // No spaces needed between tokens
-    let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | num").unwrap();
+    // No spaces needed between tokens.
+    let parser = CfgParser::new(
+        r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | "num""#,
+    ).unwrap();
 
     check(&parser, "number", "num", true);
     check(&parser, "add", "num+num", true);

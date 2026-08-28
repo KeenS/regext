@@ -6,8 +6,10 @@ fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
 }
 
 fn main() {
-    // Arithmetic grammar with real operators and precedence
-    let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2 | 3 | 4 | 5").unwrap();
+    // Arithmetic: terminals are quoted ("+"), non-terminals bare (E, T, F, NUM).
+    let parser = CfgParser::new(
+        r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | NUM; NUM -> "1" | "2" | "3" | "4" | "5""#,
+    ).unwrap();
 
     check(&parser, "number", "1", true);
     check(&parser, "addition", "1 + 2", true);

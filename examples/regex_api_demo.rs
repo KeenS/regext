@@ -9,8 +9,8 @@ fn main() {
     assert!(re.find("a test b").is_none(), "find returns None without a full match");
     assert_eq!(re.find("test").map(|m| (m.start, m.end)), Some((0, 4)), "find span");
 
-    // 2. Context-free mode: grammars go through CfgParser, which handles recursion
-    let parser = CfgParser::new("E -> E + NUM | NUM; NUM -> digit").unwrap();
+    // 2. Context-free mode: quoted terminals, non-terminals bare
+    let parser = CfgParser::new(r#"E -> E "+" NUM | NUM; NUM -> "digit""#).unwrap();
     assert!(parser.is_match("digit"), "single NUM");
     assert!(parser.is_match("digit + digit"), "recursive E");
     assert!(!parser.is_match("digit +"), "trailing operator must be rejected");

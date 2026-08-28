@@ -6,8 +6,8 @@ fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
 }
 
 fn main() {
-    // The lexer splits input without requiring spaces between tokens
-    let parser = CfgParser::new("S -> ( S ) | a").unwrap();
+    // The lexer splits input without requiring spaces between tokens.
+    let parser = CfgParser::new(r#"S -> "(" S ")" | "a""#).unwrap();
 
     check(&parser, "atom", "a", true);
     check(&parser, "single parens", "(a)", true);

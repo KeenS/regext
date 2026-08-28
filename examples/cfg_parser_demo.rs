@@ -6,16 +6,20 @@ fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
 }
 
 fn main() {
-    // 1. S-expression grammar with real parentheses
-    let sexp = CfgParser::new("SExp -> ( SExpList ) | Atom; SExpList -> SExp SExpList | SExp; Atom -> foo | bar | 1").unwrap();
+    // 1. S-expressions
+    let sexp = CfgParser::new(
+        r#"SExp -> "(" SExpList ")" | Atom; SExpList -> SExp SExpList | SExp; Atom -> "foo" | "bar" | "1""#,
+    ).unwrap();
 
     check(&sexp, "atom", "foo", true);
     check(&sexp, "list", "( foo )", true);
     check(&sexp, "nested", "( foo ( bar ) )", true);
     check(&sexp, "unknown atom", "baz", false);
 
-    // 2. Arithmetic grammar
-    let arith = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | NUM; NUM -> 1 | 2").unwrap();
+    // 2. Arithmetic
+    let arith = CfgParser::new(
+        r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | NUM; NUM -> "1" | "2""#,
+    ).unwrap();
 
     check(&arith, "number", "1", true);
     check(&arith, "add", "1 + 2", true);

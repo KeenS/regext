@@ -14,17 +14,17 @@ fn run(table: &SLRTable<String>, input: Vec<String>) -> Result<String, String> {
 }
 
 fn main() {
-    // Build the grammar with and/or combinators
+    // Compose production bodies with and/or; terminals are quoted.
     let mut registry = GrammarRegistry::new();
 
-    let e_expr = or(&and("E", "+ T"), "T");
-    let t_expr = or(&and("T", "* F"), "F");
-    let f_expr = or("( E )", "NUM");
+    let e_expr = or(&and("E", r#""+" T"#), "T"); // E "+" T | T
+    let t_expr = or(&and("T", r#""*" F"#), "F"); // T "*" F | F
+    let f_expr = or(r#""(" E ")""#, "NUM");       // "(" E ")" | NUM
 
     let _e = expr(&e_expr).named("E", &mut registry);
     let _t = expr(&t_expr).named("T", &mut registry);
     let _f = expr(&f_expr).named("F", &mut registry);
-    let _num = expr("1 | 2 | 3").named("NUM", &mut registry);
+    let _num = expr(r#""1" | "2" | "3""#).named("NUM", &mut registry);
 
     let table = LRCompiler::compile::<String>(&registry);
 

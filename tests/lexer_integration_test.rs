@@ -9,7 +9,7 @@ fn terminal_set(items: &[&str]) -> HashSet<String> {
 
 #[test]
 fn test_lexer_with_terminals() {
-    let parser = CfgParser::new("E -> E + T | T; T -> T * F | F; F -> ( E ) | num").unwrap();
+    let parser = CfgParser::new(r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | "num""#).unwrap();
     assert!(parser.is_match("num"));
     assert!(parser.is_match("num + num"));
     assert!(parser.is_match("( num )"));
@@ -18,7 +18,7 @@ fn test_lexer_with_terminals() {
 
 #[test]
 fn test_lexer_character_matching() {
-    let parser = CfgParser::new("S -> ( S ) | a").unwrap();
+    let parser = CfgParser::new(r#"S -> "(" S ")" | "a""#).unwrap();
     assert!(parser.is_match("a"));
     assert!(parser.is_match("( a )"));
     assert!(parser.is_match("( ( a ) )"));
@@ -26,7 +26,7 @@ fn test_lexer_character_matching() {
 
 #[test]
 fn test_lexer_with_operators() {
-    let parser = CfgParser::new("S -> S + S | num").unwrap();
+    let parser = CfgParser::new(r#"S -> S "+" S | "num""#).unwrap();
     assert!(parser.is_match("num"));
     assert!(parser.is_match("num + num"));
     assert!(parser.is_match("num + num + num"));
@@ -108,7 +108,7 @@ fn test_tokenizer_unknown_char_emitted_raw() {
 
 #[test]
 fn test_parser_with_char_class() {
-    let parser = CfgParser::new("S -> [1-5]").unwrap();
+    let parser = CfgParser::new(r#"S -> "[1-5]""#).unwrap();
     assert!(parser.is_match("3"));
     assert!(!parser.is_match("-"));
     assert!(!parser.is_match("0"));
@@ -117,9 +117,65 @@ fn test_parser_with_char_class() {
 
 #[test]
 fn test_parser_literal_preferred_over_char_class() {
-    let parser = CfgParser::new("S -> ab | [a-c]").unwrap();
+    let parser = CfgParser::new(r#"S -> "ab" | "[a-c]""#).unwrap();
     assert!(parser.is_match("ab"));
     assert!(parser.is_match("a"));
     assert!(parser.is_match("b"));
     assert!(!parser.is_match("d"));
+}
+
+#[test]
+fn test_tokenizer_class_run_maximal_munch() {
+    let lexer = Lexer::new(terminal_set(&["[0-9]+"]));
+    let tokens = lexer.tokenize("123 45");
+    assert_eq!(
+        tokens,
+        vec![
+            Token::Terminal("[0-9]+".to_string()),
+            Token::Terminal("[0-9]+".to_string()),
+            Token::EOF,
+        ]
+    );
+}
+
+#[test]
+fn test_tokenizer_class_run_stops_at_non_member() {
+    let lexer = Lexer::new(terminal_set(&["[a-z]+", "[0-9]+"]));
+    let tokens = lexer.tokenize("abc123");
+    assert_eq!(
+        tokens,
+        vec![
+            Token::Terminal("[a-z]+".to_string()),
+            Token::Terminal("[0-9]+".to_string()),
+            Token::EOF,
+        ]
+    );
+}
+
+#[test]
+fn test_tokenizer_quoted_string_keeps_structural_chars() {
+    let lexer = Lexer::new(terminal_set(&["any"]));
+    let tokens = lexer.tokenize(r#""hello world, {yes} [no]""#);
+    assert_eq!(tokens, vec![Token::Terminal("any".to_string()), Token::EOF]);
+}
+
+#[test]
+fn test_tokenizer_quoted_string_escapes() {
+    let lexer = Lexer::new(terminal_set(&["any"]));
+    let tokens = lexer.tokenize(r#""a \"quoted\" word""#);
+    assert_eq!(tokens, vec![Token::Terminal("any".to_string()), Token::EOF]);
+}
+
+#[test]
+fn test_tokenizer_unclosed_quote_is_not_a_string() {
+    let lexer = Lexer::new(terminal_set(&["any", "a"]));
+    let tokens = lexer.tokenize(r#""u"#);
+    assert_eq!(
+        tokens,
+        vec![
+            Token::Terminal("\"".to_string()),
+            Token::Terminal("u".to_string()),
+            Token::EOF,
+        ]
+    );
 }
