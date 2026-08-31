@@ -184,27 +184,52 @@ impl NamedExpr {
 pub fn expr(input: &str) -> NamedExpr { NamedExpr { expr: GrammarRegistry::expr(input) } }
 
 // =============================================================================
-// SLR Compiler
+// LALR(1) Compiler
 // =============================================================================
+//
+// Builds LALR(1) action/goto tables (de Remer's construction):
+//   1. build the canonical LR(1) automaton — items carry explicit lookaheads
+//      that are propagated through FIRST sets with nullability,
+//   2. merge LR(1) states that share an LR(0) core, unioning the lookaheads
+//      of corresponding items.
+//
+// Reduce/accept actions are therefore driven by the precise per-state
+// lookaheads instead of SLR(1)'s global FOLLOW sets. Every grammar that is
+// SLR(1) is LALR(1), and LALR(1) resolves conflicts that SLR(1) could not
+// (its lookahead sets are a subset of SLR(1)'s). Collisions that remain
+// (grammar is not LALR(1)) are counted and resolved last-write-wins in a
+// deterministic (sorted item) order.
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Item {
     prod_idx: usize,
     dot: usize,
+    /// Lookahead symbol; `Symbol::Terminal("EOF")` is the end-marker.
+    look: Symbol,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct State {
-    items: Vec<Item>,
+fn eof() -> Symbol {
+    Symbol::Terminal("EOF".to_string())
 }
 
-pub struct SLRTable<S> {
+pub struct LalrTable<S> {
     action: HashMap<(usize, Option<S>), Action>,
     goto: HashMap<(usize, S), usize>,
     productions: Vec<Production<S>>,
+    /// Number of (state, symbol) table slots where two different actions
+    /// collided and were resolved last-write-wins. Zero for conflict-free
+    /// LALR(1) grammars; nonzero means the grammar is not LALR(1) and the
+    /// behavior on those inputs depends on production order.
+    conflicts: usize,
 }
 
-impl<S: Clone + PartialEq + Eq + Hash + Debug> Table<S> for SLRTable<S> {
+impl<S: Clone + PartialEq + Eq + Hash + Debug> LalrTable<S> {
+    pub fn conflict_count(&self) -> usize {
+        self.conflicts
+    }
+}
+
+impl<S: Clone + PartialEq + Eq + Hash + Debug> Table<S> for LalrTable<S> {
     fn action(&self, state: usize, symbol: Option<&S>) -> Action {
         self.action.get(&(state, symbol.cloned())).cloned().unwrap_or(Action::Error)
     }
@@ -216,194 +241,253 @@ impl<S: Clone + PartialEq + Eq + Hash + Debug> Table<S> for SLRTable<S> {
     }
 }
 
+/// FIRST of the sequence `seq` followed by lookahead `look`:
+/// FIRST(seq) plus the lookahead itself when the whole sequence is nullable.
+fn first_of_seq(
+    seq: &[Symbol],
+    look: &Symbol,
+    first: &HashMap<Symbol, HashSet<Symbol>>,
+    nullable: &HashSet<Symbol>,
+) -> HashSet<Symbol> {
+    let mut out = HashSet::new();
+    let mut all_nullable = true;
+    for sym in seq {
+        if let Symbol::Terminal(_) = sym {
+            out.insert(sym.clone());
+            all_nullable = false;
+            break;
+        }
+        if let Some(f) = first.get(sym) {
+            out.extend(f.iter().cloned());
+        }
+        if !nullable.contains(sym) {
+            all_nullable = false;
+            break;
+        }
+    }
+    if all_nullable {
+        out.insert(look.clone());
+    }
+    out
+}
+
+/// LR(1) closure: add productions for non-terminals at the dot, with the
+/// lookaheads FIRST(rest-of-RHS followed by the item's lookahead).
+fn lalr_closure(
+    items: Vec<Item>,
+    prods: &[(Symbol, Vec<Symbol>)],
+    first: &HashMap<Symbol, HashSet<Symbol>>,
+    nullable: &HashSet<Symbol>,
+) -> Vec<Item> {
+    let mut cl = items;
+    let mut seen: HashSet<Item> = cl.iter().cloned().collect();
+    let mut i = 0;
+    while i < cl.len() {
+        let Item { prod_idx, dot, look } = &cl[i];
+        let rhs = &prods[*prod_idx].1;
+        if *dot < rhs.len() {
+            if let Symbol::NonTerminal(_) = &rhs[*dot] {
+                let looks = first_of_seq(&rhs[*dot + 1..], look, first, nullable);
+                for (idx, (lhs, _)) in prods.iter().enumerate() {
+                    if lhs == &rhs[*dot] {
+                        for l in &looks {
+                            let ni = Item { prod_idx: idx, dot: 0, look: l.clone() };
+                            if seen.insert(ni.clone()) {
+                                cl.push(ni);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    cl.sort();
+    cl.dedup();
+    cl
+}
+
 pub struct LRCompiler;
 
 impl LRCompiler {
-    pub fn compile<S: Clone + PartialEq + Eq + Hash + Debug>(registry: &GrammarRegistry) -> SLRTable<S> 
-    where 
-        S: From<Symbol> 
+    pub fn compile<S: Clone + PartialEq + Eq + Hash + Debug>(registry: &GrammarRegistry) -> LalrTable<S>
+    where
+        S: From<Symbol>,
     {
         let start_sym = registry.start_symbol.as_ref().expect("No start symbol");
         let mut prods = registry.productions.clone();
-        let start_sym_augmented = Symbol::NonTerminal(format!("{}_prime", 
+        let start_sym_augmented = Symbol::NonTerminal(format!("{}_prime",
             match start_sym { Symbol::NonTerminal(n) => n, Symbol::Terminal(n) => n }
         ));
         prods.insert(0, (start_sym_augmented.clone(), vec![start_sym.clone()]));
 
-        let mut productions_vec = Vec::new();
-        for (i, (lhs, rhs)) in prods.iter().enumerate() {
-            productions_vec.push(Production {
+        let productions_vec: Vec<Production<S>> = prods
+            .iter()
+            .enumerate()
+            .map(|(i, (lhs, rhs))| Production {
                 lhs: S::from(lhs.clone()),
                 rhs_len: rhs.len(),
                 id: i,
-            });
-        }
+            })
+            .collect();
 
-        fn closure(items: Vec<Item>, prods: &[(Symbol, Vec<Symbol>)]) -> Vec<Item> {
-            let mut closure = items;
-            let mut changed = true;
-            while changed {
-                changed = false;
-                let mut new_items = Vec::new();
-                for item in &closure {
-                    let rhs = &prods[item.prod_idx].1;
-                    if item.dot < rhs.len() {
-                        let symbol = &rhs[item.dot];
-                        if let Symbol::NonTerminal(_) = symbol {
-                            for (idx, (lhs, _)) in prods.iter().enumerate() {
-                                if lhs == symbol {
-                                    new_items.push(Item { prod_idx: idx, dot: 0 });
-                                }
-                            }
-                        }
+        // -- nullable + FIRST, fixpoint with nullability-aware sequences --
+        let mut nullable: HashSet<Symbol> = HashSet::new();
+        let mut first: HashMap<Symbol, HashSet<Symbol>> = HashMap::new();
+        loop {
+            let (n0, f0) = (nullable.clone(), first.clone());
+            for (lhs, rhs) in prods.iter() {
+                let mut all_nullable = true;
+                for sym in rhs.iter() {
+                    if let Symbol::Terminal(_) = sym {
+                        first.entry(lhs.clone()).or_default().insert(sym.clone());
+                        all_nullable = false;
+                        break;
+                    }
+                    if let Some(f) = first.get(sym).cloned() {
+                        first.entry(lhs.clone()).or_default().extend(f);
+                    }
+                    if !nullable.contains(sym) {
+                        all_nullable = false;
+                        break;
                     }
                 }
-                for ni in new_items {
-                    if !closure.contains(&ni) {
-                        closure.push(ni);
-                        changed = true;
-                    }
+                if all_nullable {
+                    nullable.insert(lhs.clone());
                 }
             }
-            closure.sort();
-            closure
+            if nullable == n0 && first == f0 {
+                break;
+            }
         }
 
-        let mut states = Vec::new();
+        // -- canonical LR(1) automaton --
+        let mut states: Vec<Vec<Item>> = Vec::new();
+        let mut trans: HashMap<(usize, Symbol), usize> = HashMap::new();
+        let start = lalr_closure(
+            vec![Item { prod_idx: 0, dot: 0, look: eof() }],
+            &prods,
+            &first,
+            &nullable,
+        );
+        states.push(start);
         let mut queue = VecDeque::new();
-        let start_items = closure(vec![Item { prod_idx: 0, dot: 0 }], &prods);
-        let start_state = State { items: start_items };
-        states.push(start_state.clone());
-        queue.push_back(start_state);
-
-        let mut transitions = HashMap::new();
-        while let Some(state) = queue.pop_front() {
-            let state_id = states.iter().position(|s| s == &state).unwrap();
-            let mut symbols = HashSet::new();
-            for item in &state.items {
-                let rhs = &prods[item.prod_idx].1;
-                if item.dot < rhs.len() {
-                    symbols.insert(rhs[item.dot].clone());
+        queue.push_back(0);
+        while let Some(id) = queue.pop_front() {
+            let mut syms = HashSet::new();
+            for it in &states[id] {
+                let rhs = &prods[it.prod_idx].1;
+                if it.dot < rhs.len() {
+                    syms.insert(rhs[it.dot].clone());
                 }
             }
-            for sym in symbols {
-                let next_items = closure(
-                    state.items.iter()
-                        .filter(|item| {
-                            let rhs = &prods[item.prod_idx].1;
-                            item.dot < rhs.len() && rhs[item.dot] == sym
-                        })
-                        .map(|item| Item { prod_idx: item.prod_idx, dot: item.dot + 1 })
-                        .collect(),
-                    &prods
-                );
-                let next_state = State { items: next_items };
-                if let Some(id) = states.iter().position(|s| s == &next_state) {
-                    transitions.insert((state_id, sym), id);
+            for sym in syms {
+                let advanced: Vec<Item> = states[id]
+                    .iter()
+                    .filter(|it| {
+                        let rhs = &prods[it.prod_idx].1;
+                        it.dot < rhs.len() && rhs[it.dot] == sym
+                    })
+                    .map(|it| Item { prod_idx: it.prod_idx, dot: it.dot + 1, look: it.look.clone() })
+                    .collect();
+                let next = lalr_closure(advanced, &prods, &first, &nullable);
+                if let Some(t) = states.iter().position(|s| *s == next) {
+                    trans.insert((id, sym.clone()), t);
                 } else {
-                    states.push(next_state.clone());
-                    queue.push_back(next_state);
-                    transitions.insert((state_id, sym), states.len() - 1);
+                    states.push(next);
+                    trans.insert((id, sym.clone()), states.len() - 1);
+                    queue.push_back(states.len() - 1);
                 }
             }
         }
 
-        let mut first_sets: HashMap<Symbol, HashSet<Symbol>> = HashMap::new();
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for (lhs, rhs) in &prods {
-                let mut current_first = HashSet::new();
-                if !rhs.is_empty() {
-                    let first_sym = &rhs[0];
-                    if let Symbol::Terminal(_) = first_sym {
-                        current_first.insert(first_sym.clone());
-                    } else if let Some(f) = first_sets.get(first_sym) {
-                        for s in f { current_first.insert(s.clone()); }
-                    }
+        // -- merge LR(1) states that share an LR(0) core (LALR(1)) --
+        let mut core_map: HashMap<Vec<(usize, usize)>, usize> = HashMap::new();
+        let mut lalr_states: Vec<Vec<Item>> = Vec::new();
+        let mut state_of: Vec<usize> = Vec::new();
+        for items in states.iter() {
+            let mut core: Vec<(usize, usize)> =
+                items.iter().map(|it| (it.prod_idx, it.dot)).collect();
+            core.sort();
+            core.dedup();
+            let id = match core_map.get(&core).cloned() {
+                Some(id) => id,
+                None => {
+                    core_map.insert(core, lalr_states.len());
+                    lalr_states.push(items.clone());
+                    lalr_states.len() - 1
                 }
-                let entry = first_sets.entry(lhs.clone()).or_default();
-                let old_len = entry.len();
-                entry.extend(current_first);
-                if entry.len() != old_len { changed = true; }
-            }
-        }
-
-        let mut follow_sets: HashMap<Symbol, HashSet<Symbol>> = HashMap::new();
-        let start_sym_augmented = Symbol::NonTerminal(format!("{}_prime", 
-            match start_sym { Symbol::NonTerminal(n) => n, Symbol::Terminal(n) => n }
-        ));
-        follow_sets.entry(start_sym_augmented).or_default().insert(Symbol::Terminal("EOF".to_string()));
-
-        changed = true;
-        while changed {
-            changed = false;
-            for (lhs, rhs) in &prods {
-                for i in 0..rhs.len() {
-                    let sym = &rhs[i];
-                    if let Symbol::NonTerminal(_) = sym {
-                        let mut next_follow = HashSet::new();
-                        if i + 1 < rhs.len() {
-                            let next_sym = &rhs[i+1];
-                            if let Symbol::Terminal(_) = next_sym {
-                                next_follow.insert(next_sym.clone());
-                            } else if let Some(f) = first_sets.get(next_sym) {
-                                for s in f { next_follow.insert(s.clone()); }
-                            }
-                        } else {
-                            if let Some(f) = follow_sets.get(lhs) {
-                                for s in f { next_follow.insert(s.clone()); }
-                            }
-                        }
-                        let entry = follow_sets.entry(sym.clone()).or_default();
-                        let old_len = entry.len();
-                        entry.extend(next_follow);
-                        if entry.len() != old_len { changed = true; }
-                    }
+            };
+            for it in items {
+                if !lalr_states[id].contains(it) {
+                    lalr_states[id].push(it.clone());
                 }
             }
+            state_of.push(id);
         }
 
-        let mut action_table = HashMap::new();
-        let mut goto_table = HashMap::new();
-        for (i, state) in states.iter().enumerate() {
-            for item in &state.items {
-                let rhs = &prods[item.prod_idx].1;
-                if item.dot < rhs.len() {
-                    let sym = &rhs[item.dot];
-                    if let Some(&next_state) = transitions.get(&(i, sym.clone())) {
-                        match sym {
-                            Symbol::Terminal(_) => {
-                                action_table.insert((i, Some(S::from(sym.clone()))), Action::Shift(next_state));
-                            }
-                            Symbol::NonTerminal(_) => {
-                                goto_table.insert((i, S::from(sym.clone())), next_state);
-                            }
-                        }
-                    }
-                } else {
-                    if item.prod_idx == 0 {
-                        action_table.insert((i, None), Action::Accept);
-                    } else {
-                        let lhs = &prods[item.prod_idx].0;
-                        if let Some(follow) = follow_sets.get(lhs) {
-                            for sym in follow {
-                                if let Symbol::Terminal(t) = sym {
-                                    if t == "EOF" {
-                                        action_table.insert((i, None), Action::Reduce(item.prod_idx));
-                                    } else {
-                                        action_table.insert((i, Some(S::from(sym.clone()))), Action::Reduce(item.prod_idx));
-                                    }
+        // -- transitions over the merged states --
+        let mut mtrans: HashMap<(usize, Symbol), usize> = HashMap::new();
+        let mut keys: Vec<&(usize, Symbol)> = trans.keys().collect();
+        keys.sort();
+        for k in keys {
+            mtrans
+                .entry((state_of[k.0], k.1.clone()))
+                .or_insert_with(|| state_of[trans[k]]);
+        }
+
+        // -- actions and goto --
+        let mut action_table: HashMap<(usize, Option<S>), Action> = HashMap::new();
+        let mut goto_table: HashMap<(usize, S), usize> = HashMap::new();
+        let mut conflicts: usize = 0;
+        for (st, items) in lalr_states.iter().enumerate() {
+            let mut sorted: Vec<&Item> = items.iter().collect();
+            sorted.sort();
+            for it in sorted {
+                let rhs = &prods[it.prod_idx].1;
+                if it.dot < rhs.len() {
+                    let sym = &rhs[it.dot];
+                    let target = mtrans.get(&(st, sym.clone())).copied().unwrap_or(0);
+                    match sym {
+                        Symbol::Terminal(t) => {
+                            let k = (st, Some(S::from(t.clone())));
+                            let a = Action::Shift(target);
+                            if action_table.get(&k) != Some(&a) {
+                                if action_table.contains_key(&k) {
+                                    conflicts += 1;
                                 }
+                                action_table.insert(k, a);
                             }
                         }
+                        Symbol::NonTerminal(n) => {
+                            goto_table.insert((st, S::from(n.clone())), target);
+                        }
+                    }
+                } else {
+                    let a = if it.prod_idx == 0 && it.look == eof() {
+                        Action::Accept
+                    } else {
+                        Action::Reduce(it.prod_idx)
+                    };
+                    let k = if it.look == eof() {
+                        (st, None)
+                    } else {
+                        (st, Some(S::from(it.look.clone())))
+                    };
+                    if action_table.get(&k) != Some(&a) {
+                        if action_table.contains_key(&k) {
+                            conflicts += 1;
+                        }
+                        action_table.insert(k, a);
                     }
                 }
             }
         }
-        SLRTable { action: action_table, goto: goto_table, productions: productions_vec }
+
+        LalrTable { action: action_table, goto: goto_table, productions: productions_vec, conflicts }
     }
 }
+
 
 // =============================================================================
 // Regex Engine - Encoded as CFG
@@ -540,7 +624,7 @@ impl std::fmt::Display for CfgError {
 impl std::error::Error for CfgError {}
 
 pub struct CfgParser {
-    table: SLRTable<String>,
+    table: LalrTable<String>,
     start_symbol: String,
     terminals: HashSet<String>,
 }
