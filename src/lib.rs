@@ -227,6 +227,7 @@ impl<S: Clone + PartialEq + Eq + Hash + Debug> LalrTable<S> {
     pub fn conflict_count(&self) -> usize {
         self.conflicts
     }
+
 }
 
 impl<S: Clone + PartialEq + Eq + Hash + Debug> Table<S> for LalrTable<S> {
@@ -283,13 +284,13 @@ fn lalr_closure(
     let mut seen: HashSet<Item> = cl.iter().cloned().collect();
     let mut i = 0;
     while i < cl.len() {
-        let Item { prod_idx, dot, look } = &cl[i];
-        let rhs = &prods[*prod_idx].1;
-        if *dot < rhs.len() {
-            if let Symbol::NonTerminal(_) = &rhs[*dot] {
-                let looks = first_of_seq(&rhs[*dot + 1..], look, first, nullable);
+        let Item { prod_idx, dot, look } = cl[i].clone();
+        let rhs = &prods[prod_idx].1;
+        if dot < rhs.len() {
+            if let Symbol::NonTerminal(_) = &rhs[dot] {
+                let looks = first_of_seq(&rhs[dot + 1..], &look, first, nullable);
                 for (idx, (lhs, _)) in prods.iter().enumerate() {
-                    if lhs == &rhs[*dot] {
+                    if lhs == &rhs[dot] {
                         for l in &looks {
                             let ni = Item { prod_idx: idx, dot: 0, look: l.clone() };
                             if seen.insert(ni.clone()) {
@@ -449,8 +450,8 @@ impl LRCompiler {
                     let sym = &rhs[it.dot];
                     let target = mtrans.get(&(st, sym.clone())).copied().unwrap_or(0);
                     match sym {
-                        Symbol::Terminal(t) => {
-                            let k = (st, Some(S::from(t.clone())));
+                        Symbol::Terminal(_) => {
+                            let k = (st, Some(S::from(sym.clone())));
                             let a = Action::Shift(target);
                             if action_table.get(&k) != Some(&a) {
                                 if action_table.contains_key(&k) {
@@ -459,8 +460,8 @@ impl LRCompiler {
                                 action_table.insert(k, a);
                             }
                         }
-                        Symbol::NonTerminal(n) => {
-                            goto_table.insert((st, S::from(n.clone())), target);
+                        Symbol::NonTerminal(_) => {
+                            goto_table.insert((st, S::from(sym.clone())), target);
                         }
                     }
                 } else {
@@ -686,6 +687,16 @@ impl CfgParser {
             Err(_) => false,
         }
     }
+
+    /// Number of (state, symbol) action slots where two different LALR(1)
+    /// actions collided and were resolved in production order. Zero means
+    /// the grammar is conflict-free LALR(1); nonzero means the grammar is
+    /// not LALR(1) and behavior on the colliding inputs depends on the
+    /// order of the productions.
+    pub fn conflict_count(&self) -> usize {
+        self.table.conflict_count()
+    }
+
 }
 
 #[cfg(test)]

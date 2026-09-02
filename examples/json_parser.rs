@@ -6,7 +6,7 @@ fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
 }
 
 fn main() {
-    // A genuine JSON parser (RFC 8259 values) on parser_vm's SLR(1) engine.
+    // A genuine JSON parser (RFC 8259 values) on parser_vm's LALR(1) engine.
     //
     // Containers are written right-recursively (no left recursion, no
     // conflicts) so lists can be any length, including zero:

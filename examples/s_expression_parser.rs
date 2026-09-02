@@ -6,7 +6,7 @@ fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
 }
 
 fn main() {
-    // A genuine S-expression (Lisp) parser on parser_vm's SLR(1) engine.
+    // A genuine S-expression (Lisp) parser on parser_vm's LALR(1) engine.
     //
     //   SExp   -> Quoted | List | Atom | Str
     //   List   -> "(" ")"          | "(" SExps ")"

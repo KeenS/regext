@@ -1,4 +1,4 @@
-use parser_vm::{Engine, GrammarRegistry, LRCompiler, SLRTable, expr};
+use parser_vm::{Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
 
 fn and(left: &str, right: &str) -> String {
     format!("{} {}", left, right)
@@ -8,7 +8,7 @@ fn or(left: &str, right: &str) -> String {
     format!("{} | {}", left, right)
 }
 
-fn run(table: &SLRTable<String>, input: Vec<String>) -> Result<String, String> {
+fn run(table: &LalrTable<String>, input: Vec<String>) -> Result<String, String> {
     let mut engine = Engine::new(0);
     engine.run(table, input)
 }

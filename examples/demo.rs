@@ -1,4 +1,4 @@
-use parser_vm::{Engine, GrammarRegistry, LRCompiler, SLRTable, Symbol, expr};
+use parser_vm::{Engine, GrammarRegistry, LRCompiler, LalrTable, Symbol, expr};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum MySymbol {
@@ -35,7 +35,7 @@ impl From<Symbol> for MySymbol {
     }
 }
 
-fn run(table: &SLRTable<MySymbol>, input: Vec<MySymbol>) -> Result<MySymbol, String> {
+fn run(table: &LalrTable<MySymbol>, input: Vec<MySymbol>) -> Result<MySymbol, String> {
     let mut engine = Engine::new(0);
     engine.run(table, input)
 }
