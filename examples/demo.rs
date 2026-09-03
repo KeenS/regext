@@ -2,9 +2,19 @@ use parser_vm::{Engine, GrammarRegistry, LRCompiler, LalrTable, Symbol, expr};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum MySymbol {
-    S, E, T, F,
-    LPar, RPar, Plus, Mult, Num,
-    SPrime, EPrime, TPrime, FPrime,
+    S,
+    E,
+    T,
+    F,
+    LPar,
+    RPar,
+    Plus,
+    Mult,
+    Num,
+    SPrime,
+    EPrime,
+    TPrime,
+    FPrime,
     Eof,
 }
 
@@ -48,10 +58,24 @@ fn main() {
 
     let table = LRCompiler::compile::<MySymbol>(&reg_paren);
     let paren_input = vec![
-        MySymbol::LPar, MySymbol::LPar, MySymbol::RPar, MySymbol::LPar, MySymbol::RPar,
-        MySymbol::LPar, MySymbol::LPar, MySymbol::LPar, MySymbol::RPar, MySymbol::RPar, MySymbol::RPar, MySymbol::RPar,
+        MySymbol::LPar,
+        MySymbol::LPar,
+        MySymbol::RPar,
+        MySymbol::LPar,
+        MySymbol::RPar,
+        MySymbol::LPar,
+        MySymbol::LPar,
+        MySymbol::LPar,
+        MySymbol::RPar,
+        MySymbol::RPar,
+        MySymbol::RPar,
+        MySymbol::RPar,
     ];
-    assert_eq!(run(&table, paren_input).as_ref(), Ok(&MySymbol::S), "balanced parens must parse");
+    assert_eq!(
+        run(&table, paren_input).as_ref(),
+        Ok(&MySymbol::S),
+        "balanced parens must parse"
+    );
 
     let table = LRCompiler::compile::<MySymbol>(&reg_paren);
     assert!(
@@ -67,10 +91,19 @@ fn main() {
 
     let table = LRCompiler::compile::<MySymbol>(&reg_math);
     let math_input = vec![
-        MySymbol::Num, MySymbol::Plus, MySymbol::Num, MySymbol::Mult,
-        MySymbol::LPar, MySymbol::Num, MySymbol::RPar,
+        MySymbol::Num,
+        MySymbol::Plus,
+        MySymbol::Num,
+        MySymbol::Mult,
+        MySymbol::LPar,
+        MySymbol::Num,
+        MySymbol::RPar,
     ];
-    assert_eq!(run(&table, math_input).as_ref(), Ok(&MySymbol::E), "'n + n * ( n )' must parse");
+    assert_eq!(
+        run(&table, math_input).as_ref(),
+        Ok(&MySymbol::E),
+        "'n + n * ( n )' must parse"
+    );
 
     println!("demo: 3 assertions passed");
 }

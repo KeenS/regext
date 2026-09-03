@@ -9,7 +9,8 @@ fn terminal_set(items: &[&str]) -> HashSet<String> {
 
 #[test]
 fn test_lexer_with_terminals() {
-    let parser = CfgParser::new(r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | "num""#).unwrap();
+    let parser =
+        CfgParser::new(r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | "num""#).unwrap();
     assert!(parser.is_match("num"));
     assert!(parser.is_match("num + num"));
     assert!(parser.is_match("( num )"));
@@ -90,20 +91,14 @@ fn test_tokenizer_char_class() {
 fn test_tokenizer_char_class_range_excludes_hyphen() {
     let lexer = Lexer::new(terminal_set(&["[1-5]"]));
     let tokens = lexer.tokenize("-");
-    assert_eq!(
-        tokens,
-        vec![Token::Terminal("-".to_string()), Token::EOF]
-    );
+    assert_eq!(tokens, vec![Token::Terminal("-".to_string()), Token::EOF]);
 }
 
 #[test]
 fn test_tokenizer_unknown_char_emitted_raw() {
     let lexer = Lexer::new(terminal_set(&["a"]));
     let tokens = lexer.tokenize("z");
-    assert_eq!(
-        tokens,
-        vec![Token::Terminal("z".to_string()), Token::EOF]
-    );
+    assert_eq!(tokens, vec![Token::Terminal("z".to_string()), Token::EOF]);
 }
 
 #[test]

@@ -56,6 +56,13 @@ fn test_named_api_arithmetic() {
 fn test_registry_start_symbol_and_production_count() {
     let mut registry = GrammarRegistry::new();
     let _s = expr(r#""a" | "b""#).named("S", &mut registry);
-    assert!(matches!(registry.start_symbol, Some(parser_vm::Symbol::NonTerminal(_))));
-    assert_eq!(registry.productions.len(), 2, "two alternatives -> two productions");
+    assert!(matches!(
+        registry.start_symbol,
+        Some(parser_vm::Symbol::NonTerminal(_))
+    ));
+    assert_eq!(
+        registry.productions.len(),
+        2,
+        "two alternatives -> two productions"
+    );
 }

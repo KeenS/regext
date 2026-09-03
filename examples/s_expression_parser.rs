@@ -2,7 +2,11 @@ use parser_vm::CfgParser;
 
 fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
     let result = parser.is_match(input);
-    assert_eq!(result, expected, "[{}] input '{}': expected {}", name, input, expected);
+    assert_eq!(
+        result, expected,
+        "[{}] input '{}': expected {}",
+        name, input, expected
+    );
 }
 
 fn main() {
@@ -50,8 +54,18 @@ fn main() {
     check(&parser, "list of numbers", "( -42 3.14 6.02e23 )", true);
     check(&parser, "list of lists", "( ( 1 2 ) ( 3 4 ) )", true);
     check(&parser, "function call", "( fib (- n 1) )", true);
-    check(&parser, "if expression", "( if (= n 0) 1 (* n (fib (- n 1))) )", true);
-    check(&parser, "define", "( define ( power b e ) ( if (= e 0 ) 1 ( * b ( power b ( - e 1 ) ) ) ) )", true);
+    check(
+        &parser,
+        "if expression",
+        "( if (= n 0) 1 (* n (fib (- n 1))) )",
+        true,
+    );
+    check(
+        &parser,
+        "define",
+        "( define ( power b e ) ( if (= e 0 ) 1 ( * b ( power b ( - e 1 ) ) ) ) )",
+        true,
+    );
 
     // -- quote forms -------------------------------------------------------------
     check(&parser, "quote atom", "'a", true);
@@ -68,7 +82,12 @@ fn main() {
     // -- strings -----------------------------------------------------------------
     check(&parser, "string", "\"hello\"", true);
     check(&parser, "string with parens", "\"( not a list )\"", true);
-    check(&parser, "string with escapes", "\"a \\\"quoted\\\" word\"", true);
+    check(
+        &parser,
+        "string with escapes",
+        "\"a \\\"quoted\\\" word\"",
+        true,
+    );
     check(&parser, "list with string", "( a \"b\" 3 )", true);
     check(&parser, "quoted string", "'\"str\"", true);
 

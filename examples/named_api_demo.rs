@@ -11,8 +11,16 @@ fn main() {
     let _s = expr(r#""a" | "b""#).named("S", &mut registry);
 
     let table = LRCompiler::compile::<String>(&registry);
-    assert_eq!(run(&table, vec!["a".to_string()]).as_deref(), Ok("S"), "S -> a");
-    assert_eq!(run(&table, vec!["b".to_string()]).as_deref(), Ok("S"), "S -> b");
+    assert_eq!(
+        run(&table, vec!["a".to_string()]).as_deref(),
+        Ok("S"),
+        "S -> a"
+    );
+    assert_eq!(
+        run(&table, vec!["b".to_string()]).as_deref(),
+        Ok("S"),
+        "S -> b"
+    );
 
     // 2. Nested grammar: S -> A B; A -> a | b; B -> c | d
     let mut registry = GrammarRegistry::new();
@@ -21,9 +29,20 @@ fn main() {
     let _b = expr(r#""c" | "d""#).named("B", &mut registry);
 
     let table = LRCompiler::compile::<String>(&registry);
-    assert_eq!(run(&table, vec!["a".to_string(), "c".to_string()]).as_deref(), Ok("S"), "A=a B=c");
-    assert_eq!(run(&table, vec!["b".to_string(), "d".to_string()]).as_deref(), Ok("S"), "A=b B=d");
-    assert!(run(&table, vec!["a".to_string(), "x".to_string()]).is_err(), "unknown B must be rejected");
+    assert_eq!(
+        run(&table, vec!["a".to_string(), "c".to_string()]).as_deref(),
+        Ok("S"),
+        "A=a B=c"
+    );
+    assert_eq!(
+        run(&table, vec!["b".to_string(), "d".to_string()]).as_deref(),
+        Ok("S"),
+        "A=b B=d"
+    );
+    assert!(
+        run(&table, vec!["a".to_string(), "x".to_string()]).is_err(),
+        "unknown B must be rejected"
+    );
 
     // 3. Arithmetic grammar with symbolic terminals
     let mut registry = GrammarRegistry::new();
@@ -32,14 +51,30 @@ fn main() {
     let _f = expr(r#""lparen" E "rparen" | "num""#).named("F", &mut registry);
 
     let table = LRCompiler::compile::<String>(&registry);
-    assert_eq!(run(&table, vec!["num".to_string()]).as_deref(), Ok("E"), "single num");
     assert_eq!(
-        run(&table, vec!["num".to_string(), "plus".to_string(), "num".to_string()]).as_deref(),
+        run(&table, vec!["num".to_string()]).as_deref(),
+        Ok("E"),
+        "single num"
+    );
+    assert_eq!(
+        run(
+            &table,
+            vec!["num".to_string(), "plus".to_string(), "num".to_string()]
+        )
+        .as_deref(),
         Ok("E"),
         "num plus num"
     );
     assert_eq!(
-        run(&table, vec!["lparen".to_string(), "num".to_string(), "rparen".to_string()]).as_deref(),
+        run(
+            &table,
+            vec![
+                "lparen".to_string(),
+                "num".to_string(),
+                "rparen".to_string()
+            ]
+        )
+        .as_deref(),
         Ok("E"),
         "lparen num rparen"
     );

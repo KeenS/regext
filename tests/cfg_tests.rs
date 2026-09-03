@@ -45,7 +45,8 @@ fn test_cfg_nested_with_parens() {
 fn test_cfg_arithmetic_with_parens() {
     let parser = CfgParser::new(
         r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | NUM; NUM -> "1" | "2""#,
-    ).unwrap();
+    )
+    .unwrap();
     assert!(parser.is_match("1"));
     assert!(parser.is_match("1 + 2"));
     assert!(parser.is_match("1 * 2"));
@@ -88,5 +89,8 @@ fn test_parser_any_string_token() {
 #[test]
 fn test_cfg_new_errors() {
     assert!(CfgParser::new("").is_err(), "empty grammar must error");
-    assert!(CfgParser::new("S a").is_err(), "production without -> must error");
+    assert!(
+        CfgParser::new("S a").is_err(),
+        "production without -> must error"
+    );
 }

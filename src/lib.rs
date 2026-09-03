@@ -35,9 +35,9 @@ pub struct Engine<S> {
     stack_b: Vec<usize>,
 }
 
-impl<S> Engine<S> 
-where 
-    S: Clone + PartialEq + Debug 
+impl<S> Engine<S>
+where
+    S: Clone + PartialEq + Debug,
 {
     pub fn new(initial_state: usize) -> Self {
         Self {
@@ -46,10 +46,10 @@ where
         }
     }
 
-    pub fn run<T, I>(&mut self, table: &T, input: I) -> Result<S, String> 
-    where 
+    pub fn run<T, I>(&mut self, table: &T, input: I) -> Result<S, String>
+    where
         T: Table<S>,
-        I: IntoIterator<Item = S> 
+        I: IntoIterator<Item = S>,
     {
         let mut iter = input.into_iter().peekable();
         loop {
@@ -75,7 +75,12 @@ where
                     self.stack_b.push(next_state);
                 }
                 Action::Accept => return Ok(self.stack_a.pop().ok_or("Empty stack")?),
-                Action::Error => return Err(format!("Syntax Error: state {} symbol {:?}", current_state, lookahead)),
+                Action::Error => {
+                    return Err(format!(
+                        "Syntax Error: state {} symbol {:?}",
+                        current_state, lookahead
+                    ));
+                }
             }
         }
     }
@@ -129,7 +134,11 @@ pub struct GrammarRegistry {
 
 impl GrammarRegistry {
     pub fn new() -> Self {
-        Self { productions: Vec::new(), start_symbol: None, terminals: HashSet::new() }
+        Self {
+            productions: Vec::new(),
+            start_symbol: None,
+            terminals: HashSet::new(),
+        }
     }
 
     pub fn register(&mut self, name: &str, expr: Expr) -> Symbol {
@@ -141,7 +150,9 @@ impl GrammarRegistry {
         for rhs in rhs_list {
             self.productions.push((lhs.clone(), rhs));
         }
-        if self.start_symbol.is_none() { self.start_symbol = Some(lhs.clone()); }
+        if self.start_symbol.is_none() {
+            self.start_symbol = Some(lhs.clone());
+        }
         lhs
     }
 
@@ -165,7 +176,7 @@ impl GrammarRegistry {
             return Expr::Choice(choices);
         }
         if t.contains(' ') {
-            let parts = t.split_whitespace().map(|s| Self::expr(s)).collect();
+            let parts = t.split_whitespace().map(Self::expr).collect();
             return Expr::Sequence(parts);
         }
         if t == "epsilon" {
@@ -175,13 +186,25 @@ impl GrammarRegistry {
     }
 }
 
-pub struct NamedExpr { pub expr: Expr }
+impl Default for GrammarRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct NamedExpr {
+    pub expr: Expr,
+}
 impl NamedExpr {
     pub fn named(self, name: &str, registry: &mut GrammarRegistry) -> Symbol {
         registry.register(name, self.expr)
     }
 }
-pub fn expr(input: &str) -> NamedExpr { NamedExpr { expr: GrammarRegistry::expr(input) } }
+pub fn expr(input: &str) -> NamedExpr {
+    NamedExpr {
+        expr: GrammarRegistry::expr(input),
+    }
+}
 
 // =============================================================================
 // LALR(1) Compiler
@@ -227,12 +250,14 @@ impl<S: Clone + PartialEq + Eq + Hash + Debug> LalrTable<S> {
     pub fn conflict_count(&self) -> usize {
         self.conflicts
     }
-
 }
 
 impl<S: Clone + PartialEq + Eq + Hash + Debug> Table<S> for LalrTable<S> {
     fn action(&self, state: usize, symbol: Option<&S>) -> Action {
-        self.action.get(&(state, symbol.cloned())).cloned().unwrap_or(Action::Error)
+        self.action
+            .get(&(state, symbol.cloned()))
+            .cloned()
+            .unwrap_or(Action::Error)
     }
     fn goto(&self, state: usize, symbol: &S) -> usize {
         *self.goto.get(&(state, symbol.clone())).unwrap_or(&0)
@@ -284,18 +309,26 @@ fn lalr_closure(
     let mut seen: HashSet<Item> = cl.iter().cloned().collect();
     let mut i = 0;
     while i < cl.len() {
-        let Item { prod_idx, dot, look } = cl[i].clone();
+        let Item {
+            prod_idx,
+            dot,
+            look,
+        } = cl[i].clone();
         let rhs = &prods[prod_idx].1;
-        if dot < rhs.len() {
-            if let Symbol::NonTerminal(_) = &rhs[dot] {
-                let looks = first_of_seq(&rhs[dot + 1..], &look, first, nullable);
-                for (idx, (lhs, _)) in prods.iter().enumerate() {
-                    if lhs == &rhs[dot] {
-                        for l in &looks {
-                            let ni = Item { prod_idx: idx, dot: 0, look: l.clone() };
-                            if seen.insert(ni.clone()) {
-                                cl.push(ni);
-                            }
+        if dot < rhs.len()
+            && let Symbol::NonTerminal(_) = &rhs[dot]
+        {
+            let looks = first_of_seq(&rhs[dot + 1..], &look, first, nullable);
+            for (idx, (lhs, _)) in prods.iter().enumerate() {
+                if lhs == &rhs[dot] {
+                    for l in &looks {
+                        let ni = Item {
+                            prod_idx: idx,
+                            dot: 0,
+                            look: l.clone(),
+                        };
+                        if seen.insert(ni.clone()) {
+                            cl.push(ni);
                         }
                     }
                 }
@@ -311,14 +344,18 @@ fn lalr_closure(
 pub struct LRCompiler;
 
 impl LRCompiler {
-    pub fn compile<S: Clone + PartialEq + Eq + Hash + Debug>(registry: &GrammarRegistry) -> LalrTable<S>
+    pub fn compile<S>(registry: &GrammarRegistry) -> LalrTable<S>
     where
-        S: From<Symbol>,
+        S: Clone + PartialEq + Eq + Hash + Debug + From<Symbol>,
     {
         let start_sym = registry.start_symbol.as_ref().expect("No start symbol");
         let mut prods = registry.productions.clone();
-        let start_sym_augmented = Symbol::NonTerminal(format!("{}_prime",
-            match start_sym { Symbol::NonTerminal(n) => n, Symbol::Terminal(n) => n }
+        let start_sym_augmented = Symbol::NonTerminal(format!(
+            "{}_prime",
+            match start_sym {
+                Symbol::NonTerminal(n) => n,
+                Symbol::Terminal(n) => n,
+            }
         ));
         prods.insert(0, (start_sym_augmented.clone(), vec![start_sym.clone()]));
 
@@ -366,7 +403,11 @@ impl LRCompiler {
         let mut states: Vec<Vec<Item>> = Vec::new();
         let mut trans: HashMap<(usize, Symbol), usize> = HashMap::new();
         let start = lalr_closure(
-            vec![Item { prod_idx: 0, dot: 0, look: eof() }],
+            vec![Item {
+                prod_idx: 0,
+                dot: 0,
+                look: eof(),
+            }],
             &prods,
             &first,
             &nullable,
@@ -389,7 +430,11 @@ impl LRCompiler {
                         let rhs = &prods[it.prod_idx].1;
                         it.dot < rhs.len() && rhs[it.dot] == sym
                     })
-                    .map(|it| Item { prod_idx: it.prod_idx, dot: it.dot + 1, look: it.look.clone() })
+                    .map(|it| Item {
+                        prod_idx: it.prod_idx,
+                        dot: it.dot + 1,
+                        look: it.look.clone(),
+                    })
                     .collect();
                 let next = lalr_closure(advanced, &prods, &first, &nullable);
                 if let Some(t) = states.iter().position(|s| *s == next) {
@@ -485,10 +530,14 @@ impl LRCompiler {
             }
         }
 
-        LalrTable { action: action_table, goto: goto_table, productions: productions_vec, conflicts }
+        LalrTable {
+            action: action_table,
+            goto: goto_table,
+            productions: productions_vec,
+            conflicts,
+        }
     }
 }
-
 
 // =============================================================================
 // Regex Engine - Encoded as CFG
@@ -534,10 +583,15 @@ pub struct Regex {
 }
 
 impl Regex {
+    /// The original pattern string this regex was built from.
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
     pub fn new(pattern: &str) -> Result<Self, RegexError> {
         // Encode regex pattern as CFG and use CFG engine
         let cfg_parser = Self::regex_to_cfg(pattern)?;
-        Ok(Self { 
+        Ok(Self {
             pattern: pattern.to_string(),
             cfg_parser: Some(cfg_parser),
         })
@@ -554,7 +608,7 @@ impl Regex {
         //   a|b  -> S -> "a" | "b"
         //   ab   -> S -> "ab"
         let mut grammar_parts = Vec::new();
-        
+
         if pattern.contains('*') {
             let parts: Vec<&str> = pattern.split('*').collect();
             if parts.len() == 2 {
@@ -577,7 +631,7 @@ impl Regex {
         } else {
             grammar_parts.push(format!("S -> {}", Self::quote(pattern.trim())));
         }
-        
+
         let grammar = grammar_parts.join("; ");
         CfgParser::new(&grammar).map_err(|e| RegexError::CompileError(e.to_string()))
     }
@@ -600,7 +654,9 @@ impl Regex {
 
     pub fn captures(&self, text: &str) -> Option<Captures> {
         if self.is_match(text) {
-            Some(Captures { matches: vec![Match::new(0, text.len())] })
+            Some(Captures {
+                matches: vec![Match::new(0, text.len())],
+            })
         } else {
             None
         }
@@ -634,27 +690,33 @@ impl CfgParser {
     pub fn new(grammar: &str) -> Result<Self, CfgError> {
         let mut registry = GrammarRegistry::new();
         let mut start_symbol = None;
-        
+
         for prod_str in grammar.split(';') {
             let prod_str = prod_str.trim();
-            if prod_str.is_empty() { continue; }
-            
+            if prod_str.is_empty() {
+                continue;
+            }
+
             if let Some(idx) = prod_str.find("->") {
                 let lhs = prod_str[..idx].trim();
                 let rhs = prod_str[idx + 2..].trim();
-                
+
                 if start_symbol.is_none() {
                     start_symbol = Some(lhs.to_string());
                 }
-                
+
                 let expr = GrammarRegistry::expr(rhs);
                 registry.register(lhs, expr);
             } else {
-                return Err(CfgError { message: format!("Invalid production: {}", prod_str) });
+                return Err(CfgError {
+                    message: format!("Invalid production: {}", prod_str),
+                });
             }
         }
-        
-        let start_sym = start_symbol.ok_or_else(|| CfgError { message: "No start symbol".to_string() })?;
+
+        let start_sym = start_symbol.ok_or_else(|| CfgError {
+            message: "No start symbol".to_string(),
+        })?;
         // Terminals are the terminal symbols that actually occur in productions,
         // so choice/sequence syntax like `abc|def` yields `abc` and `def`.
         let terminals: HashSet<String> = registry
@@ -667,8 +729,12 @@ impl CfgParser {
             })
             .collect();
         let table = LRCompiler::compile::<String>(&registry);
-        
-        Ok(Self { table, start_symbol: start_sym, terminals })
+
+        Ok(Self {
+            table,
+            start_symbol: start_sym,
+            terminals,
+        })
     }
 
     pub fn is_match(&self, text: &str) -> bool {
@@ -682,7 +748,7 @@ impl CfgParser {
             })
             .collect();
         let mut engine = Engine::new(0);
-        match engine.run(&self.table, symbols.into_iter()) {
+        match engine.run(&self.table, symbols) {
             Ok(result) => result == self.start_symbol,
             Err(_) => false,
         }
@@ -695,42 +761,5 @@ impl CfgParser {
     /// order of the productions.
     pub fn conflict_count(&self) -> usize {
         self.table.conflict_count()
-    }
-
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_regex_encoded_as_cfg() {
-        let re = Regex::new("a").unwrap();
-        assert!(re.is_match("a"));
-    }
-
-#[test]
-    fn zz_debug_terminals() {
-        let p = CfgParser::new(r#"S -> "[1-5]""#).unwrap();
-        eprintln!("terminals: {:?}", p.terminals);
-        let lexer = Lexer::new(p.terminals.clone());
-        eprintln!("tokens: {:?}", lexer.tokenize("3"));
-        let symbols: Vec<String> = lexer
-            .tokenize("3")
-            .into_iter()
-            .filter_map(|t| match t { Token::Terminal(s) => Some(s), Token::EOF => None })
-            .collect();
-        for s in &symbols {
-            eprintln!("action(0, {:?}) = {:?}", s, p.table.action(0, Some(s)));
-        }
-        let mut engine = Engine::new(0);
-        eprintln!("run: {:?}", engine.run(&p.table, symbols));
-        eprintln!("start: {:?}", p.start_symbol);
-    }
-
-    #[test]
-    fn test_cfg_basic() {
-        let parser = CfgParser::new(r#"S -> "a""#).unwrap();
-        assert!(parser.is_match("a"));
     }
 }

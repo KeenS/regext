@@ -2,7 +2,11 @@ use parser_vm::CfgParser;
 
 fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
     let result = parser.is_match(input);
-    assert_eq!(result, expected, "[{}] input '{}': expected {}", name, input, expected);
+    assert_eq!(
+        result, expected,
+        "[{}] input '{}': expected {}",
+        name, input, expected
+    );
 }
 
 fn main() {
@@ -59,18 +63,48 @@ fn main() {
     check(&parser, "empty array", "[]", true);
     check(&parser, "array", "[1, 2, 3]", true);
     check(&parser, "single element array", "[true]", true);
-    check(&parser, "heterogeneous array", r#"[ "rust", 7, [true, null] ]"#, true);
+    check(
+        &parser,
+        "heterogeneous array",
+        r#"[ "rust", 7, [true, null] ]"#,
+        true,
+    );
     check(&parser, "nested arrays", "[[[]]]", true);
-    check(&parser, "array of objects", r#"[ {"a": 1}, {"b": 2} ]"#, true);
+    check(
+        &parser,
+        "array of objects",
+        r#"[ {"a": 1}, {"b": 2} ]"#,
+        true,
+    );
 
     // -- objects -------------------------------------------------------------
     check(&parser, "empty object", "{}", true);
     check(&parser, "object", r#"{"name": "shun", "age": 30}"#, true);
     check(&parser, "single pair", r#"{"only": null}"#, true);
-    check(&parser, "object with everything", r#"{"pi": 3.14, "tags": ["a", "b"], "ok": true, "none": null, "delta": -1.5, "big": 6.02e23}"#, true);
-    check(&parser, "deep nesting", r#"{"a": [1, [2, [3]]], "b": {"c": "deep"}}"#, true);
-    check(&parser, "nested empty containers", r#"{"a": {"b": [{}, []]}}"#, true);
-    check(&parser, "keyword keys", r#"{"true": 1, "null": [false]}"#, true);
+    check(
+        &parser,
+        "object with everything",
+        r#"{"pi": 3.14, "tags": ["a", "b"], "ok": true, "none": null, "delta": -1.5, "big": 6.02e23}"#,
+        true,
+    );
+    check(
+        &parser,
+        "deep nesting",
+        r#"{"a": [1, [2, [3]]], "b": {"c": "deep"}}"#,
+        true,
+    );
+    check(
+        &parser,
+        "nested empty containers",
+        r#"{"a": {"b": [{}, []]}}"#,
+        true,
+    );
+    check(
+        &parser,
+        "keyword keys",
+        r#"{"true": 1, "null": [false]}"#,
+        true,
+    );
 
     // -- a real document -----------------------------------------------------
     let document = r#"{

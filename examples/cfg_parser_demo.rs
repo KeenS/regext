@@ -2,7 +2,11 @@ use parser_vm::CfgParser;
 
 fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
     let result = parser.is_match(input);
-    assert_eq!(result, expected, "[{}] input '{}': expected {}", name, input, expected);
+    assert_eq!(
+        result, expected,
+        "[{}] input '{}': expected {}",
+        name, input, expected
+    );
 }
 
 fn main() {
@@ -19,7 +23,8 @@ fn main() {
     // 2. Arithmetic
     let arith = CfgParser::new(
         r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | NUM; NUM -> "1" | "2""#,
-    ).unwrap();
+    )
+    .unwrap();
 
     check(&arith, "number", "1", true);
     check(&arith, "add", "1 + 2", true);

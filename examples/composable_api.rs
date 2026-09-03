@@ -19,7 +19,7 @@ fn main() {
 
     let e_expr = or(&and("E", r#""+" T"#), "T"); // E "+" T | T
     let t_expr = or(&and("T", r#""*" F"#), "F"); // T "*" F | F
-    let f_expr = or(r#""(" E ")""#, "NUM");       // "(" E ")" | NUM
+    let f_expr = or(r#""(" E ")""#, "NUM"); // "(" E ")" | NUM
 
     let _e = expr(&e_expr).named("E", &mut registry);
     let _t = expr(&t_expr).named("T", &mut registry);
@@ -29,14 +29,32 @@ fn main() {
     let table = LRCompiler::compile::<String>(&registry);
 
     // Each run needs a fresh engine; the start symbol is E.
-    assert_eq!(run(&table, vec!["1".to_string()]).as_deref(), Ok("E"), "single number");
     assert_eq!(
-        run(&table, vec!["1".to_string(), "+".to_string(), "2".to_string()]).as_deref(),
+        run(&table, vec!["1".to_string()]).as_deref(),
+        Ok("E"),
+        "single number"
+    );
+    assert_eq!(
+        run(
+            &table,
+            vec!["1".to_string(), "+".to_string(), "2".to_string()]
+        )
+        .as_deref(),
         Ok("E"),
         "addition"
     );
     assert_eq!(
-        run(&table, vec!["(".to_string(), "1".to_string(), "+".to_string(), "2".to_string(), ")".to_string()]).as_deref(),
+        run(
+            &table,
+            vec![
+                "(".to_string(),
+                "1".to_string(),
+                "+".to_string(),
+                "2".to_string(),
+                ")".to_string()
+            ]
+        )
+        .as_deref(),
         Ok("E"),
         "parenthesized"
     );

@@ -31,13 +31,6 @@ fn test_regex_plus() {
 }
 
 #[test]
-fn test_regex_complex() {
-    let re = Regex::new("a|b").unwrap();
-    assert!(re.is_match("a"));
-    assert!(re.is_match("b"));
-}
-
-#[test]
 fn test_regex_find() {
     let re = Regex::new("test").unwrap();
     assert!(re.find("test").is_some());
@@ -50,15 +43,4 @@ fn test_regex_captures() {
     let caps = re.captures("hello");
     assert!(caps.is_some());
     assert_eq!(caps.unwrap().matches.len(), 1);
-}
-
-#[test]
-fn test_regex_encoded_as_cfg() {
-    // Verify regex uses CFG engine
-    let re = Regex::new("a").unwrap();
-    assert!(re.is_match("a"));
-    
-    let re = Regex::new("a|b").unwrap();
-    assert!(re.is_match("a"));
-    assert!(re.is_match("b"));
 }

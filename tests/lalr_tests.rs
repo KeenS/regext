@@ -28,7 +28,11 @@ const NOT_LALR_GRAMMAR: &str = r#"S -> More | Less; More -> "a" More "b" | "a" X
 
 fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
     let result = parser.is_match(input);
-    assert_eq!(result, expected, "[{}] input {:?}: expected {}", name, input, expected);
+    assert_eq!(
+        result, expected,
+        "[{}] input {:?}: expected {}",
+        name, input, expected
+    );
 }
 
 fn parse(grammar: &str) -> CfgParser {
@@ -86,8 +90,15 @@ fn test_named_api_compiles_conflict_free_tables() {
     assert_eq!(table.conflict_count(), 0);
 
     let mut engine = Engine::new(0);
-    let result = engine.run(&table, vec!["n".to_string(), "+".to_string(), "n".to_string()]);
-    assert_eq!(result, Ok("E".to_string()), "engine must derive the start symbol");
+    let result = engine.run(
+        &table,
+        vec!["n".to_string(), "+".to_string(), "n".to_string()],
+    );
+    assert_eq!(
+        result,
+        Ok("E".to_string()),
+        "engine must derive the start symbol"
+    );
 }
 
 // =============================================================================
@@ -206,14 +217,7 @@ fn test_arithmetic_precedence_and_parens() {
         check(&parser, "arith-accept", input, true);
     }
     for input in [
-        "n n",
-        "n +",
-        "+ n",
-        "n *",
-        "( n",
-        "n )",
-        "( n ) +",
-        "n + n *",
+        "n n", "n +", "+ n", "n *", "( n", "n )", "( n ) +", "n + n *",
     ] {
         check(&parser, "arith-reject", input, false);
     }

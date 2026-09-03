@@ -20,11 +20,18 @@ fn main() {
 
     let input = vec!["1".to_string(), "+".to_string(), "2".to_string()];
     let result = engine.run(&table, input);
-    assert_eq!(result.as_deref(), Ok("E"), "'1 + 2' must parse to the start symbol");
+    assert_eq!(
+        result.as_deref(),
+        Ok("E"),
+        "'1 + 2' must parse to the start symbol"
+    );
 
     // Goal of AST mapping (roadmap): reduce the parse to a Rust data structure.
     let expected = Arith::Plus(Box::new(Arith::Num(1)), Box::new(Arith::Num(2)));
     let mult_example = Arith::Mult(Box::new(Arith::Num(2)), Box::new(Arith::Num(3)));
-    println!("ast_mapping: 1 assertion passed; target AST for '1 + 2': {:#?}", expected);
+    println!(
+        "ast_mapping: 1 assertion passed; target AST for '1 + 2': {:#?}",
+        expected
+    );
     println!("ast_mapping: target AST for '2 * 3': {:#?}", mult_example);
 }

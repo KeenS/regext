@@ -2,7 +2,11 @@ use parser_vm::CfgParser;
 
 fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
     let result = parser.is_match(input);
-    assert_eq!(result, expected, "[{}] input '{}': expected {}", name, input, expected);
+    assert_eq!(
+        result, expected,
+        "[{}] input '{}': expected {}",
+        name, input, expected
+    );
 }
 
 fn main() {
