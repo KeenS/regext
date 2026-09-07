@@ -1,4 +1,4 @@
-use parser_vm::{CfgParser, Regex};
+use parser_vm::{Captures, CfgParser, Match, Regex};
 
 fn main() {
     // 1. Regex literals (whole-input matching)
@@ -9,9 +9,10 @@ fn main() {
         "whole-input semantics: substring must not match"
     );
     assert!(!re.is_match("abc"), "non-match");
-    assert!(
-        re.find("a test b").is_none(),
-        "find returns None without a full match"
+    assert_eq!(
+        re.find("a test b").map(|m| (m.start, m.end)),
+        Some((2, 6)),
+        "find the leftmost match"
     );
     assert_eq!(
         re.find("test").map(|m| (m.start, m.end)),
@@ -19,7 +20,7 @@ fn main() {
         "find span"
     );
 
-    // 2. Context-free mode: quoted terminals, non-terminals bare
+    // 2. Context-free mode: quoted terminals, bare nonterminals
     let parser = CfgParser::new(r#"E -> E "+" NUM | NUM; NUM -> "digit""#).unwrap();
     assert!(parser.is_match("digit"), "single NUM");
     assert!(parser.is_match("digit + digit"), "recursive E");
@@ -28,14 +29,33 @@ fn main() {
         "trailing operator must be rejected"
     );
 
-    // 3. Captures
+    // 3. Captures: the whole match plus, at the leftmost start, a partial
+    //    match still captures (unlike the anchored `is_match`).
     let re = Regex::new("hello").unwrap();
-    let caps = re.captures("hello").expect("captures on match");
-    assert_eq!(caps.matches.len(), 1, "capture count");
-    assert!(
-        re.captures("hello world").is_none(),
-        "whole-input semantics: no capture on partial"
+    let caps = re.captures("hello").expect("captures on a match");
+    assert_eq!(caps.matches, vec![Some(Match::new(0, 5))], "capture count");
+    assert_eq!(
+        re.captures("hello world"),
+        Some(Captures {
+            matches: vec![Some(Match::new(0, 5))]
+        }),
+        "leftmost capture on a longer input"
     );
 
-    println!("regex_api_demo: 8 assertions passed");
+    // 4. Groups: in `(ab)+` the group is the repeated unit, so it records the
+    //    last iteration while the whole match spans the run.
+    let re = Regex::new("(ab)+").unwrap();
+    let caps = re.captures("abab").expect("captures on a group match");
+    assert_eq!(
+        caps.matches,
+        vec![Some(Match::new(0, 4)), Some(Match::new(2, 4))],
+        "last iteration of (ab)"
+    );
+
+    // 5. The compiler is honest about encodings that are not LALR(1).
+    assert!(
+        Regex::new("(a)+a").is_err(),
+        "non-LALR(1) pattern must be rejected"
+    );
+    println!("regex_api_demo: 12 assertions passed");
 }

@@ -8,6 +8,16 @@ pub enum Token {
     EOF,
 }
 
+/// A lexer token with its byte span in the input text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenSpan {
+    pub token: Token,
+    /// Byte offset of the first byte of the token.
+    pub start: usize,
+    /// Byte offset just past the last byte of the token.
+    pub end: usize,
+}
+
 pub struct Lexer {
     string_rules: Vec<String>,
     class_runs: Vec<(String, HashSet<char>)>,
@@ -76,9 +86,18 @@ impl Lexer {
         members
     }
 
-    pub fn tokenize(&self, input: &str) -> Vec<Token> {
+    /// Tokenize and record the byte span of every token.
+    pub fn tokenize_with_spans(&self, input: &str) -> Vec<TokenSpan> {
         let chars: Vec<char> = input.chars().collect();
-        let mut tokens = Vec::new();
+        let mut byte_off = Vec::with_capacity(chars.len() + 1);
+        let mut acc = 0;
+        byte_off.push(0);
+        for ch in &chars {
+            acc += ch.len_utf8();
+            byte_off.push(acc);
+        }
+
+        let mut spans = Vec::new();
         let mut i = 0;
 
         while i < chars.len() {
@@ -87,21 +106,32 @@ impl Lexer {
                 continue;
             }
 
-            match self.match_symbol(&chars, i) {
-                Some((symbol, next)) => {
-                    tokens.push(Token::Terminal(symbol));
-                    i = next;
-                }
-                None => {
-                    // Unknown characters are still emitted so the parser can report them.
-                    tokens.push(Token::Terminal(chars[i].to_string()));
-                    i += 1;
-                }
-            }
+            let (symbol, next) = match self.match_symbol(&chars, i) {
+                Some(t) => t,
+                // Unknown characters are still emitted so the parser can report them.
+                None => (chars[i].to_string(), i + 1),
+            };
+            spans.push(TokenSpan {
+                token: Token::Terminal(symbol),
+                start: byte_off[i],
+                end: byte_off[next],
+            });
+            i = next;
         }
 
-        tokens.push(Token::EOF);
-        tokens
+        spans.push(TokenSpan {
+            token: Token::EOF,
+            start: input.len(),
+            end: input.len(),
+        });
+        spans
+    }
+
+    pub fn tokenize(&self, input: &str) -> Vec<Token> {
+        self.tokenize_with_spans(input)
+            .into_iter()
+            .map(|span| span.token)
+            .collect()
     }
 
     fn match_symbol(&self, chars: &[char], i: usize) -> Option<(String, usize)> {

@@ -19,9 +19,9 @@ pub mod lalr;
 pub mod lexer;
 pub mod regex;
 
-pub use cfg_parser::{CfgError, CfgParser};
-pub use engine::{Action, Engine, Production, Table};
+pub use cfg_parser::{Captures, CfgError, CfgParser, Match};
+pub use engine::{Action, Engine, Production, Reduction, Table};
 pub use grammar::{Expr, GrammarRegistry, NamedExpr, Symbol, expr};
 pub use lalr::{LRCompiler, LalrTable};
 pub use lexer::{Lexer, Token};
-pub use regex::{Captures, Match, Regex, RegexError};
+pub use regex::{Regex, RegexError};
