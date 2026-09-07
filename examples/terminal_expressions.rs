@@ -1,4 +1,4 @@
-use parser_vm::CfgParser;
+use RegExt::CfgParser;
 
 fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
     let result = parser.is_match(input);

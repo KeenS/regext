@@ -1,4 +1,4 @@
-use parser_vm::CfgParser;
+use RegExt::CfgParser;
 
 fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
     let result = parser.is_match(input);
@@ -10,7 +10,7 @@ fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
 }
 
 fn main() {
-    // A genuine S-expression (Lisp) parser on parser_vm's LALR(1) engine.
+    // A genuine S-expression (Lisp) parser on RegExt's LALR(1) engine.
     //
     //   SExp   -> Quoted | List | Atom | Str
     //   List   -> "(" ")"          | "(" SExps ")"

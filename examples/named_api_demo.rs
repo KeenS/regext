@@ -1,4 +1,4 @@
-use parser_vm::{Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
+use RegExt::{Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
 
 fn run(table: &LalrTable<String>, input: Vec<String>) -> Result<String, String> {
     let mut engine = Engine::new(0);

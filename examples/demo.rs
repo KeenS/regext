@@ -1,4 +1,4 @@
-use parser_vm::{Engine, GrammarRegistry, LRCompiler, LalrTable, Symbol, expr};
+use RegExt::{Engine, GrammarRegistry, LRCompiler, LalrTable, Symbol, expr};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum MySymbol {

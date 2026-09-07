@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use parser_vm::CfgParser;
-use parser_vm::lexer::{Lexer, Token};
+use RegExt::CfgParser;
+use RegExt::lexer::{Lexer, Token};
 
 fn terminal_set(items: &[&str]) -> HashSet<String> {
     items.iter().map(|s| s.to_string()).collect()

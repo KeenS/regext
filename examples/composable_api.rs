@@ -1,4 +1,4 @@
-use parser_vm::{Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
+use RegExt::{Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
 
 fn and(left: &str, right: &str) -> String {
     format!("{} {}", left, right)

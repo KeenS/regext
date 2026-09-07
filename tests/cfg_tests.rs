@@ -1,4 +1,4 @@
-use parser_vm::{Captures, CfgParser, Match};
+use RegExt::{Captures, CfgParser, Match};
 
 #[test]
 fn test_cfg_basic() {

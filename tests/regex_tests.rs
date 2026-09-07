@@ -2,7 +2,7 @@
 //! `find`, `captures` with group spans, and the honest rejection of
 //! patterns whose CFG encoding is not LALR(1).
 
-use parser_vm::{Captures, Match, Regex, RegexError};
+use RegExt::{Captures, Match, Regex, RegexError};
 
 fn caps(matches: Vec<Option<Match>>) -> Captures {
     Captures { matches }

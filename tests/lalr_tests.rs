@@ -9,7 +9,7 @@
 //! same 14 merged LALR states, same 6 conflict slots, and the same
 //! final action table.
 
-use parser_vm::{CfgParser, Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
+use RegExt::{CfgParser, Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
 
 const JSON_GRAMMAR: &str = r#"Value -> Object | Array | Str | Number | "true" | "false" | "null"; Object -> "{" "}" | "{" Pair Tail; Tail -> "," Pair Tail | "}"; Pair -> Str ":" Value; Array -> "[" "]" | "[" Value VTail; VTail -> "," Value VTail | "]"; Str -> "any"; Number -> "[-0-9.eE+]+""#;
 

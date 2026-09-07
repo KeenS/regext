@@ -1,4 +1,4 @@
-use parser_vm::{Captures, CfgParser, Match, Regex};
+use RegExt::{Captures, CfgParser, Match, Regex};
 
 fn main() {
     // 1. Regex literals (whole-input matching)

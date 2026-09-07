@@ -1,4 +1,4 @@
-use parser_vm::{Engine, GrammarRegistry, LRCompiler, expr};
+use RegExt::{Engine, GrammarRegistry, LRCompiler, expr};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Arith {

@@ -1,4 +1,4 @@
-use parser_vm::CfgParser;
+use RegExt::CfgParser;
 
 fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
     let result = parser.is_match(input);
@@ -10,7 +10,7 @@ fn check(parser: &CfgParser, name: &str, input: &str, expected: bool) {
 }
 
 fn main() {
-    // A genuine JSON parser (RFC 8259 values) on parser_vm's LALR(1) engine.
+    // A genuine JSON parser (RFC 8259 values) on RegExt's LALR(1) engine.
     //
     // Containers are written right-recursively (no left recursion, no
     // conflicts) so lists can be any length, including zero:
@@ -108,7 +108,7 @@ fn main() {
 
     // -- a real document -----------------------------------------------------
     let document = r#"{
-        "name": "parser_vm",
+        "name": "RegExt",
         "version": 3,
         "features": ["lr", "slr", "json"],
         "limits": {"depth": null, "count": 42.5},

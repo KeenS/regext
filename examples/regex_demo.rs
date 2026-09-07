@@ -1,4 +1,4 @@
-use parser_vm::{Match, Regex};
+use RegExt::{Match, Regex};
 
 fn main() {
     // The Regex API mirrors the regex-crate surface — whole-input `is_match`,

@@ -1,4 +1,4 @@
-use parser_vm::{Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
+use RegExt::{Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
 
 fn run(table: &LalrTable<String>, input: Vec<String>) -> Result<String, String> {
     let mut engine = Engine::new(0);
@@ -58,7 +58,7 @@ fn test_registry_start_symbol_and_production_count() {
     let _s = expr(r#""a" | "b""#).named("S", &mut registry);
     assert!(matches!(
         registry.start_symbol,
-        Some(parser_vm::Symbol::NonTerminal(_))
+        Some(RegExt::Symbol::NonTerminal(_))
     ));
     assert_eq!(
         registry.productions.len(),
