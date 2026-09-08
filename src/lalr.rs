@@ -1,17 +1,37 @@
-//! LALR(1) compiler.
+//! The LALR(1) compiler: de Remer's construction over a
+//! [`GrammarRegistry`].
 //!
-//! Builds LALR(1) action/goto tables (de Remer's construction):
-//!   1. build the canonical LR(1) automaton — items carry explicit lookaheads
-//!      that are propagated through FIRST sets with nullability,
-//!   2. merge LR(1) states that share an LR(0) core, unioning the lookaheads
-//!      of corresponding items.
+//! The construction has two phases:
 //!
-//! Reduce/accept actions are therefore driven by the precise per-state
-//! lookaheads instead of SLR(1)'s global FOLLOW sets. Every grammar that is
-//! SLR(1) is LALR(1), and LALR(1) resolves conflicts that SLR(1) could not
-//! (its lookahead sets are a subset of SLR(1)'s). Collisions that remain
-//! (grammar is not LALR(1)) are counted and resolved last-write-wins in a
-//! deterministic (sorted item) order.
+//! 1. Build the canonical **LR(1)** automaton — items carry explicit
+//!    lookaheads propagated through FIRST sets with nullability.
+//! 2. Merge LR(1) states that share an **LR(0) core** (LALR(1)), unioning the
+//!    lookaheads of corresponding items.
+//!
+//! Reduce/accept actions are therefore driven by precise per-state lookaheads
+//! instead of SLR(1)'s global FOLLOW sets: every SLR(1) grammar is LALR(1),
+//! and LALR(1) resolves conflicts SLR(1) cannot. Collisions that remain mean
+//! the grammar is **not** LALR(1); they are counted (see
+//! [`LalrTable::conflict_count`]) and resolved last-write-wins in a
+//! deterministic (sorted-item) order so behavior stays reproducible.
+//!
+//! ```
+//! use RegExt::{GrammarRegistry, LRCompiler, expr};
+//!
+//! // Conflict-free grammar:
+//! let mut ok = GrammarRegistry::new();
+//! expr(r#""a" | "b""#).named("S", &mut ok);
+//! assert_eq!(LRCompiler::compile::<String>(&ok).conflict_count(), 0);
+//!
+//! // The `(a)+a` shape: after the repetition, a further `a` could extend it
+//! // or be the trailing literal — a genuine shift/reduce conflict, which is
+//! // counted rather than hidden.
+//! let mut bad = GrammarRegistry::new();
+//! expr(r#"N1 "a""#).named("S", &mut bad);
+//! expr(r#"G1 N1 | G1"#).named("N1", &mut bad);
+//! expr(r#""a""#).named("G1", &mut bad);
+//! assert_eq!(LRCompiler::compile::<String>(&bad).conflict_count(), 1);
+//! ```
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
@@ -46,7 +66,10 @@ fn eof() -> Symbol {
     Symbol::Terminal("EOF".to_string())
 }
 
+/// A compiled LALR(1) table over symbol type `S`; implements
+/// [`crate::engine::Table`].
 pub struct LalrTable<S> {
+    /// `(state, lookahead)` actions; `None` lookahead is end-of-input.
     action: HashMap<(usize, Option<S>), Action>,
     goto: HashMap<(usize, S), usize>,
     productions: Vec<Production<S>>,
@@ -58,6 +81,9 @@ pub struct LalrTable<S> {
 }
 
 impl<S: Clone + PartialEq + Eq + Hash + Debug> LalrTable<S> {
+    /// Number of `(state, symbol)` slots whose actions collided and were
+    /// resolved in production order. Zero for conflict-free LALR(1) grammars;
+    /// non-zero means the grammar is not LALR(1).
     pub fn conflict_count(&self) -> usize {
         self.conflicts
     }
@@ -152,9 +178,12 @@ fn lalr_closure(
     cl
 }
 
+/// The LALR(1) compiler (unit struct; see the module docs).
 pub struct LRCompiler;
 
 impl LRCompiler {
+    /// Compile a registry's productions into a table. The first registered
+    /// nonterminal is the start symbol (an augmented production is prepended).
     pub fn compile<S>(registry: &GrammarRegistry) -> LalrTable<S>
     where
         S: Clone + PartialEq + Eq + Hash + Debug + From<Symbol>,

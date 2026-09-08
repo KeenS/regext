@@ -19,12 +19,33 @@
 //!   - `find`       leftmost match at any position; the match extends as far
 //!     as the grammar allows (leftmost start, longest match)
 //!   - `captures`   the leftmost match plus the span of each capture group
+//!
+//! ```
+//! use RegExt::{Match, Regex};
+//!
+//! let re = Regex::new("a(b)+c").unwrap();
+//! assert!(re.is_match("abbbc"));          // anchored: whole input
+//! assert_eq!(re.find("xyabbcz"), Some(Match::new(2, 6)));
+//! let caps = re.captures("abbc").unwrap();
+//! assert_eq!(caps.matches, vec![Some(Match::new(0, 4)), Some(Match::new(2, 3))]);
+//! ```
 
 use crate::cfg_parser::{Captures, CfgParser, Match};
 
+/// Error returned by [`Regex::new`].
+///
+/// [`InvalidPattern`][Self::InvalidPattern] means the pattern syntax itself is
+/// invalid in RegExt's dialect (for example a `.` or an empty alternative).
+/// [`CompileError`][Self::CompileError] means the pattern is syntactically
+/// fine but its CFG encoding is not conflict-free LALR(1), in which case the
+/// message carries the number of table conflicts.
 #[derive(Debug, Clone)]
 pub enum RegexError {
+    /// The pattern is not valid RegExt syntax (unbalanced groups, `.` any-char,
+    /// empty alternative, quantifier without operand, dangling escape, ...).
     InvalidPattern(String),
+    /// The pattern compiles to a grammar with LALR(1) conflicts, so it is
+    /// refused rather than resolved in production order.
     CompileError(String),
 }
 
@@ -326,6 +347,13 @@ fn lower(node: &PNode) -> Cfg {
 // Regex
 // =============================================================================
 
+/// A compiled regular expression: a pattern lowered to a CFG grammar and
+/// matched by the LALR(1) engine.
+///
+/// `Regex` is a restricted, honest dialect of regular expressions — see the
+/// crate-level documentation for the pattern language, the matching semantics
+/// (anchored [`is_match`][Self::is_match], leftmost [`find`][Self::find]), and
+/// the capture-group semantics.
 pub struct Regex {
     pattern: String,
     cfg: CfgParser,
@@ -354,6 +382,7 @@ impl Regex {
         })
     }
 
+    /// The original pattern string, unchanged.
     pub fn pattern(&self) -> &str {
         &self.pattern
     }

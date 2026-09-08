@@ -1,24 +1,61 @@
-//! Core VM: the shift/reduce table interface and two-stack engine.
+//! The shift/reduce core: the [`Table`] interface that a parsed grammar
+//! implements, and the two-stack [`Engine`] that evaluates it.
+//!
+//! A table maps `(state, lookahead)` to an [`Action`] and `(state,
+//! nonterminal)` to a next state; the engine keeps a symbol stack and a state
+//! stack, shifting input symbols and reducing productions until it accepts or
+//! errors. [`run_traced`][Engine::run_traced] additionally records, for every
+//! reduction, the input range it covered — which is how capture-group spans
+//! are computed.
+//!
+//! ```
+//! use RegExt::{Engine, GrammarRegistry, LRCompiler, expr};
+//!
+//! let mut registry = GrammarRegistry::new();
+//! expr(r#""a" "b""#).named("S", &mut registry);
+//! let table = LRCompiler::compile::<String>(&registry);
+//! let mut engine = Engine::new(0);
+//! let result = engine.run(&table, vec!["a".to_string(), "b".to_string()]);
+//! assert_eq!(result.as_deref(), Ok("S"));
+//! ```
 
 use std::fmt::Debug;
 
+/// The action a table prescribes for a `(state, lookahead)` pair.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    /// Push the input symbol and move to the given state.
     Shift(usize),
+    /// Pop `rhs_len` symbols, push the production's LHS, then follow its
+    /// goto; `usize` is the production id.
     Reduce(usize),
+    /// The input is fully consumed and the start symbol derived.
     Accept,
+    /// No valid action: the input is not in the language.
     Error,
 }
 
+/// One production of a table: its left-hand side, the length of its right-hand
+/// side, and its id (the index into [`Table::production`]).
 pub struct Production<S> {
+    /// The nonterminal the production derives.
     pub lhs: S,
+    /// Number of RHS symbols to pop on a reduce.
     pub rhs_len: usize,
+    /// Opaque production id.
     pub id: usize,
 }
 
+/// A compiled parse table over symbol type `S`.
+///
+/// `LalrTable<S>` (see [`crate::lalr`]) is the built-in implementation.
+/// `action` takes the lookahead as `Option<&S>` where `None` is end-of-input.
 pub trait Table<S> {
+    /// The action for `state` with lookahead `symbol` (`None` = EOF).
     fn action(&self, state: usize, symbol: Option<&S>) -> Action;
+    /// The state reached after reducing a nonterminal `symbol` in `state`.
     fn goto(&self, state: usize, symbol: &S) -> usize;
+    /// The production with the given id.
     fn production(&self, id: usize) -> &Production<S>;
 }
 
@@ -33,6 +70,9 @@ pub struct Reduction<S> {
     pub end: usize,
 }
 
+/// A two-stack shift/reduce evaluator for any [`Table`].
+///
+/// `stack_a` holds symbols, `stack_b` the corresponding states.
 pub struct Engine<S> {
     stack_a: Vec<S>,
     stack_b: Vec<usize>,
@@ -42,6 +82,8 @@ impl<S> Engine<S>
 where
     S: Clone + PartialEq + Debug,
 {
+    /// Start in `initial_state` with empty stacks. For a `LalrTable` this is
+    /// state `0`.
     pub fn new(initial_state: usize) -> Self {
         Self {
             stack_a: Vec::new(),
@@ -49,6 +91,8 @@ where
         }
     }
 
+    /// Run the engine over `input` (an iterator of symbols, EOF excluded).
+    /// Returns the derived start symbol on success.
     pub fn run<T, I>(&mut self, table: &T, input: I) -> Result<S, String>
     where
         T: Table<S>,

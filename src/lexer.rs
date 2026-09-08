@@ -1,5 +1,37 @@
+//! The maximal-munch tokenizer for grammar terminals.
+//!
+//! Given the terminal set of a grammar, the lexer scans input text and emits
+//! one [`Token`] per match, longest terminal first, skipping whitespace.
+//! Unknown characters are still emitted (as single-character tokens) so the
+//! parser can reject them precisely.
+//!
+//! Recognized terminal shapes:
+//!
+//! | Terminal     | Emits                                                       |
+//! |--------------|-------------------------------------------------------------|
+//! | `"literal"`  | the exact literal                                           |
+//! | `"[a-z]"`    | one character from the class (ranges like `a-z` supported)  |
+//! | `"[a-z]+"`   | a maximal-munch run: the longest stretch of class characters |
+//! | `"any"`      | a whole double-quoted string, matched as one unit           |
+//!
+//! ```
+//! use std::collections::HashSet;
+//! use RegExt::lexer::{Lexer, Token};
+//!
+//! let lexer = Lexer::new(HashSet::from(["ab".to_string()]));
+//! assert_eq!(
+//!     lexer.tokenize("ab ab"),
+//!     vec![
+//!         Token::Terminal("ab".to_string()),
+//!         Token::Terminal("ab".to_string()),
+//!         Token::EOF,
+//!     ]
+//! );
+//! ```
+
 use std::collections::HashSet;
 
+/// A lexer token.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     /// A token carrying the grammar symbol it matched.
@@ -18,6 +50,7 @@ pub struct TokenSpan {
     pub end: usize,
 }
 
+/// A maximal-munch tokenizer built from a grammar's terminal set.
 pub struct Lexer {
     string_rules: Vec<String>,
     class_runs: Vec<(String, HashSet<char>)>,
@@ -26,6 +59,8 @@ pub struct Lexer {
 }
 
 impl Lexer {
+    /// Build a lexer from the grammar's terminals (see the module docs for
+    /// the recognized terminal shapes).
     pub fn new(terminals: HashSet<String>) -> Self {
         let mut string_rules = Vec::new();
         let mut class_runs = Vec::new();
@@ -127,6 +162,7 @@ impl Lexer {
         spans
     }
 
+    /// Tokenize `input`; the result always ends with [`Token::EOF`].
     pub fn tokenize(&self, input: &str) -> Vec<Token> {
         self.tokenize_with_spans(input)
             .into_iter()

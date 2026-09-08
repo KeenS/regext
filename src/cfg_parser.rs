@@ -1,4 +1,28 @@
-//! `CfgParser`: grammar-string front end (lexer + LALR(1) table + engine).
+//! `CfgParser`: the grammar-string front end — a lexer, an LALR(1) table,
+//! and the shift/reduce engine, wired together.
+//!
+//! A grammar is a string of `;`-separated productions:
+//!
+//! - the **first left-hand side is the start symbol**;
+//! - a **quoted** right-hand-side symbol is a terminal, an **unquoted** one is
+//!   a nonterminal;
+//! - `|` is alternation (separate productions), `epsilon` is the empty symbol.
+//!
+//! ```
+//! use RegExt::{Captures, CfgParser, Match};
+//!
+//! let parser = CfgParser::new(r#"S -> "x" G "y"; G -> "a" | "b""#).unwrap();
+//! assert!(parser.is_match("xay"));                 // anchored
+//! assert_eq!(parser.find("zzxbyq"), Some(Match::new(2, 5)));
+//! assert_eq!(
+//!     parser.captures("xay", &["G"]),
+//!     Some(Captures { matches: vec![Some(Match::new(0, 3)), Some(Match::new(1, 2))] })
+//! );
+//! ```
+//!
+//! Terminals may be plain literals, character classes (`"[a-z]"`),
+//! maximal-munch class runs (`"[a-z]+"`), or `"any"` (a whole double-quoted
+//! string) — see [`crate::lexer`].
 
 use std::collections::HashSet;
 
@@ -7,6 +31,8 @@ use crate::grammar::{GrammarRegistry, Symbol};
 use crate::lalr::{LRCompiler, LalrTable};
 use crate::lexer::{Lexer, Token, TokenSpan};
 
+/// Error returned by [`CfgParser::new`]: the grammar string was malformed
+/// (a production without `->`, or no productions at all).
 #[derive(Debug, Clone)]
 pub struct CfgError {
     message: String,
@@ -30,6 +56,7 @@ pub struct Match {
 }
 
 impl Match {
+    /// Make a span from its half-open byte offsets.
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
@@ -45,6 +72,10 @@ pub struct Captures {
     pub matches: Vec<Option<Match>>,
 }
 
+/// A compiled context-free grammar: terminals (for the [`Lexer`]), a start
+/// symbol, and an LALR(1) action/goto table driving the [`Engine`].
+///
+/// See the module docs for the grammar string format.
 pub struct CfgParser {
     table: LalrTable<String>,
     start_symbol: String,
@@ -52,6 +83,11 @@ pub struct CfgParser {
 }
 
 impl CfgParser {
+    /// Compile a grammar string.
+    ///
+    /// The first left-hand side becomes the start symbol; the terminal set is
+    /// derived from the productions and drives [`Lexer`] tokenization. Fails
+    /// with [`CfgError`] on a production without `->` or an empty grammar.
     pub fn new(grammar: &str) -> Result<Self, CfgError> {
         let mut registry = GrammarRegistry::new();
         let mut start_symbol = None;
@@ -102,6 +138,8 @@ impl CfgParser {
         })
     }
 
+    /// Anchored match: `true` when the ENTIRE input (all of its tokens)
+    /// derives the start symbol.
     pub fn is_match(&self, text: &str) -> bool {
         let lexer = Lexer::new(self.terminals.clone());
         let symbols: Vec<String> = lexer
