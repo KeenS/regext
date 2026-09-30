@@ -53,8 +53,8 @@ fn run(table: &LalrTable<MySymbol>, input: Vec<MySymbol>) -> Result<MySymbol, St
 fn main() {
     // 1. Balanced parentheses: S -> ( S ) S | epsilon
     let mut reg_paren = GrammarRegistry::new();
-    expr(r#""(" S ")" S"#).named("S", &mut reg_paren);
-    expr("epsilon").named("S", &mut reg_paren);
+    expr(r#""(" S ")" S"#).named("S", &mut reg_paren).unwrap();
+    expr("epsilon").named("S", &mut reg_paren).unwrap();
 
     let table = LRCompiler::compile::<MySymbol>(&reg_paren);
     let paren_input = vec![
@@ -85,9 +85,9 @@ fn main() {
 
     // 2. Arithmetic: E -> E + T | T; T -> T * F | F; F -> ( E ) | n
     let mut reg_math = GrammarRegistry::new();
-    expr(r#"E "+" T | T"#).named("E", &mut reg_math);
-    expr(r#"T "*" F | F"#).named("T", &mut reg_math);
-    expr(r#""(" E ")" | "n""#).named("F", &mut reg_math);
+    expr(r#"E "+" T | T"#).named("E", &mut reg_math).unwrap();
+    expr(r#"T "*" F | F"#).named("T", &mut reg_math).unwrap();
+    expr(r#""(" E ")" | "n""#).named("F", &mut reg_math).unwrap();
 
     let table = LRCompiler::compile::<MySymbol>(&reg_math);
     let math_input = vec![

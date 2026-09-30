@@ -1,67 +1,86 @@
-use RegExt::{Engine, GrammarRegistry, LRCompiler, LalrTable, expr};
+//! The composable CFG API: `Expr` pieces combine with `.or(...)` (choice)
+//! and `.then(...)` (juxtaposition); the first piece registered is the
+//! start symbol; and `CfgParser::from_registry` turns the composed grammar
+//! into a full `CfgParser` (`is_match` / `find` / `captures`) — the same
+//! engine as `CfgParser::new`, built from pieces instead of one string.
+//!
+//! The grammar:
+//!
+//! ```text
+//! E -> E "+" T | T
+//! T -> T "*" F | F
+//! F -> "(" E ")" | "1" | "2" | "3"
+//! ```
 
-fn and(left: &str, right: &str) -> String {
-    format!("{} {}", left, right)
-}
-
-fn or(left: &str, right: &str) -> String {
-    format!("{} | {}", left, right)
-}
-
-fn run(table: &LalrTable<String>, input: Vec<String>) -> Result<String, String> {
-    let mut engine = Engine::new(0);
-    engine.run(table, input)
-}
+use RegExt::{CfgParser, Expr, GrammarRegistry, Match};
 
 fn main() {
-    // Compose production bodies with and/or; terminals are quoted.
+    // One composable piece per nonterminal: `or` = `|`, `then` = sequence.
+    let e = Expr::call("E")
+        .then(Expr::str("+"))
+        .then(Expr::call("T"))
+        .or(Expr::call("T"));
+    let t = Expr::call("T")
+        .then(Expr::str("*"))
+        .then(Expr::call("F"))
+        .or(Expr::call("F"));
+    let f = Expr::str("(")
+        .then(Expr::call("E"))
+        .then(Expr::str(")"))
+        .or(Expr::str("1"))
+        .or(Expr::str("2"))
+        .or(Expr::str("3"));
+
+    // First registration is the start symbol (E).
     let mut registry = GrammarRegistry::new();
+    e.named("E", &mut registry).unwrap();
+    t.named("T", &mut registry).unwrap();
+    f.named("F", &mut registry).unwrap();
 
-    let e_expr = or(&and("E", r#""+" T"#), "T"); // E "+" T | T
-    let t_expr = or(&and("T", r#""*" F"#), "F"); // T "*" F | F
-    let f_expr = or(r#""(" E ")""#, "NUM"); // "(" E ")" | NUM
+    let parser = CfgParser::from_registry(registry).unwrap();
 
-    let _e = expr(&e_expr).named("E", &mut registry);
-    let _t = expr(&t_expr).named("T", &mut registry);
-    let _f = expr(&f_expr).named("F", &mut registry);
-    let _num = expr(r#""1" | "2" | "3""#).named("NUM", &mut registry);
+    // Anchored, whole input.
+    assert!(parser.is_match("1 + 2 * 3"), "addition and multiplication");
+    assert!(parser.is_match("(1 + 2) * 1"), "parentheses");
+    assert!(!parser.is_match("1 +"), "dangling operator");
+    assert!(!parser.is_match("4"), "4 is not a terminal");
 
-    let table = LRCompiler::compile::<String>(&registry);
-
-    // Each run needs a fresh engine; the start symbol is E.
+    // Leftmost match anywhere.
     assert_eq!(
-        run(&table, vec!["1".to_string()]).as_deref(),
-        Ok("E"),
-        "single number"
-    );
-    assert_eq!(
-        run(
-            &table,
-            vec!["1".to_string(), "+".to_string(), "2".to_string()]
-        )
-        .as_deref(),
-        Ok("E"),
-        "addition"
-    );
-    assert_eq!(
-        run(
-            &table,
-            vec![
-                "(".to_string(),
-                "1".to_string(),
-                "+".to_string(),
-                "2".to_string(),
-                ")".to_string()
-            ]
-        )
-        .as_deref(),
-        Ok("E"),
-        "parenthesized"
-    );
-    assert!(
-        run(&table, vec!["1".to_string(), "+".to_string()]).is_err(),
-        "trailing operator must be rejected"
+        parser.find("xy 1 * 2 z"),
+        Some(Match::new(3, 8)),
+        "find 1 * 2"
     );
 
-    println!("composable_api: 4 assertions passed");
+    // Captures: the last `T` reduction in the winning derivation.
+    let caps = parser.captures("1 + 2 * 3", &["T"]).unwrap();
+    assert_eq!(
+        caps.matches,
+        vec![Some(Match::new(0, 9)), Some(Match::new(4, 9))],
+        "T captures 2 * 3"
+    );
+
+    // Parity with the grammar-string front end.
+    let str_parser =
+        CfgParser::new(r#"E -> E "+" T | T; T -> T "*" F | F; F -> "(" E ")" | "1" | "2" | "3""#)
+            .unwrap();
+    for t in [
+        "1",
+        "3",
+        "1 + 2",
+        "1 * 2 * 3",
+        "(1 + 2) * 1",
+        "1 +",
+        "1 *",
+        "x 1 z",
+    ] {
+        assert_eq!(
+            parser.is_match(t),
+            str_parser.is_match(t),
+            "is_match({t:?})"
+        );
+        assert_eq!(parser.find(t), str_parser.find(t), "find({t:?})");
+    }
+
+    println!("composable_api: 22 assertions passed");
 }

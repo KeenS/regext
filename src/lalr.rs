@@ -20,16 +20,16 @@
 //!
 //! // Conflict-free grammar:
 //! let mut ok = GrammarRegistry::new();
-//! expr(r#""a" | "b""#).named("S", &mut ok);
+//! expr(r#""a" | "b""#).named("S", &mut ok).unwrap();
 //! assert_eq!(LRCompiler::compile::<String>(&ok).conflict_count(), 0);
 //!
 //! // The `(a)+a` shape: after the repetition, a further `a` could extend it
 //! // or be the trailing literal — a genuine shift/reduce conflict, which is
 //! // counted rather than hidden.
 //! let mut bad = GrammarRegistry::new();
-//! expr(r#"N1 "a""#).named("S", &mut bad);
-//! expr(r#"G1 N1 | G1"#).named("N1", &mut bad);
-//! expr(r#""a""#).named("G1", &mut bad);
+//! expr(r#"N1 "a""#).named("S", &mut bad).unwrap();
+//! expr(r#"G1 N1 | G1"#).named("N1", &mut bad).unwrap();
+//! expr(r#""a""#).named("G1", &mut bad).unwrap();
 //! assert_eq!(LRCompiler::compile::<String>(&bad).conflict_count(), 1);
 //! ```
 

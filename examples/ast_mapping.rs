@@ -10,10 +10,10 @@ enum Arith {
 fn main() {
     // Registration order matters: the first non-terminal is the start symbol.
     let mut registry = GrammarRegistry::new();
-    let _e = expr(r#"E "+" T | T"#).named("E", &mut registry);
-    let _t = expr(r#"T "*" F | F"#).named("T", &mut registry);
-    let _f = expr(r#""(" E ")" | NUM"#).named("F", &mut registry);
-    let _num = expr(r#""1" | "2" | "3""#).named("NUM", &mut registry);
+    let _e = expr(r#"E "+" T | T"#).named("E", &mut registry).unwrap();
+    let _t = expr(r#"T "*" F | F"#).named("T", &mut registry).unwrap();
+    let _f = expr(r#""(" E ")" | NUM"#).named("F", &mut registry).unwrap();
+    let _num = expr(r#""1" | "2" | "3""#).named("NUM", &mut registry).unwrap();
 
     let table = LRCompiler::compile::<String>(&registry);
     let mut engine = Engine::new(0);

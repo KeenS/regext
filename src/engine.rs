@@ -12,7 +12,7 @@
 //! use RegExt::{Engine, GrammarRegistry, LRCompiler, expr};
 //!
 //! let mut registry = GrammarRegistry::new();
-//! expr(r#""a" "b""#).named("S", &mut registry);
+//! expr(r#""a" "b""#).named("S", &mut registry).unwrap();
 //! let table = LRCompiler::compile::<String>(&registry);
 //! let mut engine = Engine::new(0);
 //! let result = engine.run(&table, vec!["a".to_string(), "b".to_string()]);

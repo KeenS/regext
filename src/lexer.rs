@@ -11,6 +11,7 @@
 //! |--------------|-------------------------------------------------------------|
 //! | `"literal"`  | the exact literal                                           |
 //! | `"[a-z]"`    | one character from the class (ranges like `a-z` supported)  |
+//! | `"[^a-z]"`    | one character NOT in the class (negated class)              |
 //! | `"[a-z]+"`   | a maximal-munch run: the longest stretch of class characters |
 //! | `"any"`      | a whole double-quoted string, matched as one unit           |
 //!
@@ -56,6 +57,7 @@ pub struct Lexer {
     class_runs: Vec<(String, HashSet<char>)>,
     literals: Vec<String>,
     char_classes: Vec<(String, HashSet<char>)>,
+    negated_classes: Vec<(String, HashSet<char>)>,
 }
 
 impl Lexer {
@@ -66,6 +68,7 @@ impl Lexer {
         let mut class_runs = Vec::new();
         let mut literals = Vec::new();
         let mut char_classes = Vec::new();
+        let mut negated_classes = Vec::new();
 
         for terminal in terminals {
             let chars: Vec<char> = terminal.chars().collect();
@@ -83,6 +86,15 @@ impl Lexer {
                 // A [..]+ terminal is a maximal-munch run: one token of the
                 // longest consecutive stretch of member characters.
                 class_runs.push((terminal, Self::parse_class(&chars[1..chars.len() - 2])));
+            } else if chars.len() >= 4
+                && chars[0] == '['
+                && chars[1] == '^'
+                && chars[chars.len() - 1] == ']'
+            {
+                // A [^..] terminal is a negated class: one character that is
+                // NOT a member. Membership excludes the set, so a literal
+                // member is never tokenized as the negated class.
+                negated_classes.push((terminal, Self::parse_class(&chars[2..chars.len() - 1])));
             } else if chars.len() >= 3 && chars[0] == '[' && chars[chars.len() - 1] == ']' {
                 char_classes.push((terminal, Self::parse_class(&chars[1..chars.len() - 1])));
             } else {
@@ -95,12 +107,14 @@ impl Lexer {
         string_rules.sort();
         class_runs.sort_by(|a, b| a.0.cmp(&b.0));
         char_classes.sort_by(|a, b| a.0.cmp(&b.0));
+        negated_classes.sort_by(|a, b| a.0.cmp(&b.0));
 
         Self {
             string_rules,
             class_runs,
             literals,
             char_classes,
+            negated_classes,
         }
     }
 
@@ -201,6 +215,15 @@ impl Lexer {
 
         for (class, members) in &self.char_classes {
             if members.contains(&chars[i]) {
+                return Some((class.clone(), i + 1));
+            }
+        }
+
+        // Negated classes go last among the class forms: literals and plain
+        // classes keep winning, and the membership test already excludes the
+        // set, so a literal member never tokenizes as its own negation.
+        for (class, members) in &self.negated_classes {
+            if !members.contains(&chars[i]) {
                 return Some((class.clone(), i + 1));
             }
         }

@@ -82,9 +82,9 @@ fn test_epsilon_grammar_is_conflict_free_lalr() {
 #[test]
 fn test_named_api_compiles_conflict_free_tables() {
     let mut registry = GrammarRegistry::new();
-    let _e = expr(r#"E "+" T | T"#).named("E", &mut registry);
-    let _t = expr(r#"T "*" F | F"#).named("T", &mut registry);
-    let _f = expr(r#""(" E ")" | "n""#).named("F", &mut registry);
+    let _e = expr(r#"E "+" T | T"#).named("E", &mut registry).unwrap();
+    let _t = expr(r#"T "*" F | F"#).named("T", &mut registry).unwrap();
+    let _f = expr(r#""(" E ")" | "n""#).named("F", &mut registry).unwrap();
 
     let table: LalrTable<String> = LRCompiler::compile(&registry);
     assert_eq!(table.conflict_count(), 0);
