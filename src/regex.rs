@@ -53,9 +53,11 @@
 //! conflict-free LALR(1) is refused with [`RegexError::CompileError`].
 //!
 //! Semantics (inherited from [`CfgParser`]):
-//!   - `is_match`   the ENTIRE input must match (anchored at both ends)
+//!   - `is_match`   the whole token stream must match. The lexer skips
+//!                  whitespace, so surrounding spaces still match.
 //!   - `find`       leftmost match at any position; the match extends as far
-//!     as the grammar allows (leftmost start, longest match)
+//!     as the grammar allows (leftmost start, longest match). Skipped
+//!     whitespace is not part of the span.
 //!   - `captures`   the leftmost match plus the span of each capture group
 //!
 //! ```
@@ -426,48 +428,82 @@ pub(crate) const MAX_BOUND: u32 = 100;
 
 fn parse_repetition(p: &mut PParser) -> Result<Pattern, RegexError> {
     let atom = parse_atom(p)?;
-    // At most one quantifier or bound per atom: a quantifier applied to an
-    // already-quantified atom (`a*+`, `a{2}+`, `a**`) is rejected rather
-    // than silently nested.
-    let quantified = matches!(
-        atom,
-        Pattern::Star(..) | Pattern::Plus(..) | Pattern::Opt(..) | Pattern::Bound(..)
-    );
-    match p.peek() {
-        Some('*') | Some('+') | Some('?') | Some('{') if quantified => {
-            Err(RegexError::InvalidPattern(
-                "quantifier after a quantifier or repetition bound".to_string(),
-            ))
-        }
-        Some('*') => {
-            p.bump();
-            if p.peek() == Some('+') {
-                // Possessive marker: this engine never backtracks, so a
-                // possessive star behaves exactly like a plain one.
-                p.bump();
-            }
-            Ok(Pattern::Star(Box::new(atom)))
-        }
-        Some('+') => {
-            p.bump();
-            if p.peek() == Some('+') {
-                p.bump();
-            }
-            Ok(Pattern::Plus(Box::new(atom)))
-        }
-        Some('?') => {
-            p.bump();
-            if p.peek() == Some('+') {
-                p.bump();
-            }
-            Ok(Pattern::Opt(Box::new(atom)))
-        }
-        Some('{') => {
-            let (min, max) = parse_bound(p)?;
-            Ok(Pattern::Bound(Box::new(atom), min, max))
-        }
-        _ => Ok(atom),
+    // `ab*` binds the quantifier to the last character only.
+    let (prefix, atom) = split_quantified_literal(atom, p.peek());
+    let node = apply_quantifiers(p, atom)?;
+    if prefix.is_empty() {
+        Ok(node)
+    } else {
+        Ok(Pattern::Seq(vec![Pattern::Lit(prefix), node]))
     }
+}
+
+/// `*`, `+`, and `?` nest (`a**` lowers and is then refused as a non-LALR
+/// grammar). A `+` glued to the first quantifier is the possessive marker
+/// (`a*+`). A further `+` after that marker (`a*++`), a `{` after any
+/// quantifier, and any quantifier after a bound (`a{2}+`, `a{2}{3}`) are
+/// syntax errors.
+fn apply_quantifiers(p: &mut PParser, mut node: Pattern) -> Result<Pattern, RegexError> {
+    let mut applied = false;
+    let mut possessive = false;
+    loop {
+        match p.peek() {
+            Some('{') => {
+                if applied {
+                    return Err(quantifier_after_quantifier());
+                }
+                let (min, max) = parse_bound(p)?;
+                node = Pattern::Bound(Box::new(node), min, max);
+                applied = true;
+            }
+            Some('*' | '+' | '?') => {
+                if applied && matches!(node, Pattern::Bound(..)) {
+                    return Err(quantifier_after_quantifier());
+                }
+                // `a*++`: the first `+` was the possessive marker; the
+                // leftover `+` is a second possessive, not `(a*)+`.
+                if applied && possessive && p.peek() == Some('+') {
+                    return Err(quantifier_after_quantifier());
+                }
+                let op = p.peek().unwrap();
+                p.bump();
+                if !applied && p.peek() == Some('+') {
+                    p.bump();
+                    possessive = true;
+                }
+                node = match op {
+                    '*' => Pattern::Star(Box::new(node)),
+                    '+' => Pattern::Plus(Box::new(node)),
+                    _ => Pattern::Opt(Box::new(node)),
+                };
+                applied = true;
+            }
+            _ => return Ok(node),
+        }
+    }
+}
+
+fn quantifier_after_quantifier() -> RegexError {
+    RegexError::InvalidPattern("quantifier after a quantifier or repetition bound".to_string())
+}
+
+/// When a multi-character literal is followed by a quantifier, the
+/// quantifier binds to its last character (`ab*` = `a` then `b*`).
+fn split_quantified_literal(atom: Pattern, next: Option<char>) -> (String, Pattern) {
+    let quantified = matches!(next, Some('*' | '+' | '?' | '{'));
+    let Pattern::Lit(text) = atom else {
+        return (String::new(), atom);
+    };
+    if !quantified {
+        return (String::new(), Pattern::Lit(text));
+    }
+    let count = text.chars().count();
+    if count < 2 {
+        return (String::new(), Pattern::Lit(text));
+    }
+    let base: String = text.chars().take(count - 1).collect();
+    let last: String = text.chars().skip(count - 1).collect();
+    (base, Pattern::Lit(last))
 }
 
 /// Parse a repetition bound — p.pos is just past the `{` on entry. Accepts
@@ -582,6 +618,9 @@ fn parse_atom(p: &mut PParser) -> Result<Pattern, RegexError> {
         Some('}') => Err(RegexError::InvalidPattern(
             "unexpected '}' in pattern".to_string(),
         )),
+        Some(']') => Err(RegexError::InvalidPattern(
+            "unexpected ']' in pattern".to_string(),
+        )),
         Some('\\') => {
             p.bump();
             match p.peek() {
@@ -641,6 +680,9 @@ fn parse_class(p: &mut PParser) -> Result<Pattern, RegexError> {
             "empty class in pattern".to_string(),
         ));
     }
+    if let Err(msg) = crate::lexer::parse_class_members(&body) {
+        return Err(RegexError::InvalidPattern(msg));
+    }
     if p.peek() != Some(']') {
         return Err(RegexError::InvalidPattern(
             "unbalanced '[' in class: expected ']'".to_string(),
@@ -698,8 +740,8 @@ fn parse_assertion(p: &mut PParser) -> Result<Pattern, RegexError> {
     Ok(Pattern::Assert(Box::new(body), kind, negated))
 }
 
-/// Consume a run of plain characters. A quantifier right after the run
-/// binds to the run's LAST character only (`ab*` = `a` then `b*`).
+/// Consume a run of plain characters. A following quantifier is applied by
+/// [`parse_repetition`], which binds it to the run's last character.
 fn parse_literal_run(p: &mut PParser) -> Result<Pattern, RegexError> {
     let start = p.pos;
     while let Some(ch) = p.peek() {
@@ -708,49 +750,13 @@ fn parse_literal_run(p: &mut PParser) -> Result<Pattern, RegexError> {
         }
         p.bump();
     }
-    let run: String = p.chars[start..p.pos].iter().collect();
-    match p.peek() {
-        Some('*') | Some('+') | Some('?') => {
-            let quantifier = p.peek().unwrap();
-            p.bump();
-            if p.peek() == Some('+') {
-                // Possessive marker after the quantifier.
-                p.bump();
-            }
-            let base: String = run.chars().take(run.chars().count() - 1).collect();
-            let last: String = run.chars().skip(run.chars().count() - 1).collect();
-            let rep = match quantifier {
-                '*' => Pattern::Star(Box::new(Pattern::Lit(last))),
-                '+' => Pattern::Plus(Box::new(Pattern::Lit(last))),
-                _ => Pattern::Opt(Box::new(Pattern::Lit(last))),
-            };
-            let mut seq = Vec::new();
-            if !base.is_empty() {
-                seq.push(Pattern::Lit(base));
-            }
-            seq.push(rep);
-            Ok(match seq.len() {
-                1 => seq.into_iter().next().unwrap(),
-                _ => Pattern::Seq(seq),
-            })
-        }
-        Some('{') => {
-            let (min, max) = parse_bound(p)?;
-            let base: String = run.chars().take(run.chars().count() - 1).collect();
-            let last: String = run.chars().skip(run.chars().count() - 1).collect();
-            let rep = Pattern::Bound(Box::new(Pattern::Lit(last)), min, max);
-            let mut seq = Vec::new();
-            if !base.is_empty() {
-                seq.push(Pattern::Lit(base));
-            }
-            seq.push(rep);
-            Ok(match seq.len() {
-                1 => seq.into_iter().next().unwrap(),
-                _ => Pattern::Seq(seq),
-            })
-        }
-        _ => Ok(Pattern::Lit(run)),
+    if start == p.pos {
+        return Err(RegexError::InvalidPattern(
+            "unexpected character in pattern".to_string(),
+        ));
     }
+    let run: String = p.chars[start..p.pos].iter().collect();
+    Ok(Pattern::Lit(run))
 }
 
 /// Collapse the composable API's identity nodes so the lowering sees the
@@ -769,10 +775,14 @@ fn normalize(node: &Pattern) -> Pattern {
                 .map(normalize)
                 .filter(|e| !matches!(e, Pattern::Empty))
                 .collect();
-            match kept.len() {
+            // Adjacent literals are one terminal, matching a string run
+            // (`lit("a").then(lit("b"))` = `ab`). A quantifier stays a
+            // separate node, so `a` then `b*` does not collapse.
+            let merged = merge_adjacent_lits(kept);
+            match merged.len() {
                 0 => Pattern::Empty,
-                1 => kept.into_iter().next().unwrap(),
-                _ => Pattern::Seq(kept),
+                1 => merged.into_iter().next().unwrap(),
+                _ => Pattern::Seq(merged),
             }
         }
         Pattern::Alt(alts) => Pattern::Alt(alts.iter().map(normalize).collect()),
@@ -822,6 +832,34 @@ fn normalize(node: &Pattern) -> Pattern {
             Pattern::Assert(Box::new(normalize(base)), *kind, *negated)
         }
     }
+}
+
+fn merge_adjacent_lits(nodes: Vec<Pattern>) -> Vec<Pattern> {
+    let mut out = Vec::new();
+    for node in nodes {
+        if let Pattern::Lit(text) = &node {
+            if let Some(Pattern::Lit(prev)) = out.last_mut() {
+                prev.push_str(text);
+                continue;
+            }
+        }
+        out.push(node);
+    }
+    out
+}
+
+/// Quote `text` as a grammar terminal, escaping `\` and `"` so the grammar
+/// scanner reads the same characters back.
+fn quote_terminal(text: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in text.chars() {
+        if ch == '\\' || ch == '"' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
 }
 
 // =============================================================================
@@ -874,7 +912,7 @@ impl Lowerer {
     /// nonterminals (alternations, repetitions, groups) it introduces.
     fn emit(&mut self, node: &Pattern) -> Vec<String> {
         match node {
-            Pattern::Lit(s) => vec![format!("\"{}\"", s)],
+            Pattern::Lit(s) => vec![quote_terminal(s)],
             Pattern::Seq(els) => els.iter().flat_map(|e| self.emit(e)).collect(),
             Pattern::Empty => vec![],
             Pattern::Alt(alts) => {
@@ -934,7 +972,7 @@ impl Lowerer {
             Pattern::Class(body, negated) => {
                 // One quoted terminal, in exactly the lexer's class form.
                 let prefix = if *negated { "^" } else { "" };
-                vec![format!("\"[{prefix}{body}]\"")]
+                vec![quote_terminal(&format!("[{prefix}{body}]"))]
             }
             Pattern::NoCap(inner) => {
                 // Syntactic sugar over sequence/alternation: inline the body.
@@ -1111,10 +1149,15 @@ impl Assertion {
 /// shared 100-copy cap or are inverted (`{3,2}`).
 fn validate(node: &Pattern) -> Result<(), RegexError> {
     match node {
-        Pattern::Class(body, _) if body.is_empty() => {
-            return Err(RegexError::InvalidPattern(
-                "empty class in pattern".to_string(),
-            ));
+        Pattern::Class(body, _) => {
+            if body.is_empty() {
+                return Err(RegexError::InvalidPattern(
+                    "empty class in pattern".to_string(),
+                ));
+            }
+            if let Err(msg) = crate::lexer::parse_class_members(body) {
+                return Err(RegexError::InvalidPattern(msg));
+            }
         }
         Pattern::Bound(_, min, max) => {
             if *min > MAX_BOUND as usize {
@@ -1207,6 +1250,9 @@ impl Regex {
     /// when the encoding (or an assertion body) is not LALR(1).
     pub fn new(pattern: &str) -> Result<Self, RegexError> {
         let ast = parse_pattern(pattern)?;
+        // An escape ends a literal run, so `a\|b` is three atoms. Merge them
+        // the same way the composable front end merges `lit("a").then(lit("|"))`.
+        let ast = normalize(&ast);
         Self::compile(pattern.to_string(), &ast)
     }
 
@@ -1394,32 +1440,16 @@ impl Regex {
         }
     }
 
-    /// Candidate slice bounds in `text`: every innermost grammar
-    /// contributes its token starts (candidate left ends) and token ends
-    /// (candidate right ends); a grammar with no tokens in the text
-    /// contributes position 0 so empty matches stay reachable. A slice a
-    /// side accepts is always bounded by that side's token boundaries, so
-    /// the union over all sides contains every slice any `find` can return
-    /// — even when the sides' tokenizations differ.
-    fn boundaries(&self, text: &str, starts: &mut Vec<usize>, ends: &mut Vec<usize>) {
+    /// A non-empty slice is a `find` candidate only when every innermost
+    /// grammar's tokens cover it exactly (first token at byte 0, last token
+    /// ending at the slice length). Skipped whitespace is therefore not part
+    /// of a match span. An empty slice is always a candidate.
+    fn covers_span(&self, text: &str, b0: usize, b1: usize) -> bool {
         match &self.body {
-            RegexBody::Grammar { cfg, .. } => {
-                let spans = cfg.token_spans(text);
-                let tokens = &spans[..spans.len().saturating_sub(1)];
-                if tokens.is_empty() {
-                    starts.push(0);
-                    ends.push(0);
-                } else {
-                    for t in tokens {
-                        starts.push(t.start);
-                        ends.push(t.end);
-                    }
-                }
-            }
-            RegexBody::Complement(inner) => inner.boundaries(text, starts, ends),
+            RegexBody::Grammar { cfg, .. } => cfg.covers_text(&text[b0..b1]),
+            RegexBody::Complement(inner) => inner.covers_span(text, b0, b1),
             RegexBody::Intersection(left, right) => {
-                left.boundaries(text, starts, ends);
-                right.boundaries(text, starts, ends);
+                left.covers_span(text, b0, b1) && right.covers_span(text, b0, b1)
             }
         }
     }
@@ -1451,28 +1481,19 @@ impl Regex {
 
     /// The leftmost accepted slice (leftmost start, longest at that start),
     /// as a byte span; `None` when no slice of the input is accepted.
+    /// Candidates are char boundaries. A non-empty slice must be covered by
+    /// its tokens; the empty slice is tried last at that start.
     fn find_slice(&self, text: &str) -> Option<(usize, usize)> {
-        let mut starts = Vec::new();
-        let mut ends = Vec::new();
-        self.boundaries(text, &mut starts, &mut ends);
-        starts.sort_unstable();
-        starts.dedup();
-        ends.sort_unstable();
-        ends.dedup();
-        let covers = |s: usize| ends.binary_search(&s).is_ok();
-        for start in starts {
-            for end in ends.iter().rev() {
-                if *end < start {
+        let mut bounds: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+        bounds.push(text.len());
+        for (start_i, &start) in bounds.iter().enumerate() {
+            for &end in bounds[start_i..].iter().rev() {
+                if start != end && !self.covers_span(text, start, end) {
                     continue;
                 }
-                if self.accepts_span(text, start, *end) {
-                    return Some((start, *end));
+                if self.accepts_span(text, start, end) {
+                    return Some((start, end));
                 }
-            }
-            // The empty slice at this start (an epsilon match) was tried
-            // last for every start in the old enumeration.
-            if !covers(start) && self.accepts_span(text, start, start) {
-                return Some((start, start));
             }
         }
         None

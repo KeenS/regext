@@ -4,7 +4,9 @@
 //! `GrammarRegistry::expr` parses the production-right-hand-side mini-language
 //! used by the grammar-string front end: a quoted token is a terminal, an
 //! unquoted one a nonterminal, whitespace separates a sequence, `|` is
-//! choice, and `epsilon` is empty.
+//! choice, and `epsilon` is empty. `;`, `|`, whitespace, and `->` split
+//! only outside quotes. Inside a terminal, `\\` and `\"` are escapes; an
+//! empty terminal is rejected.
 //!
 //! ```
 //! use RegExt::{expr, Symbol};
@@ -28,7 +30,7 @@
 //! languages are not closed under complement or intersection) and its
 //! zero-width assertions (a `Regex`-engine feature); see the crate docs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::cfg_parser::CfgError;
 use crate::regex::MAX_BOUND;
@@ -41,13 +43,18 @@ pub enum Symbol {
     Terminal(String),
     /// A nonterminal symbol; the string is its name in the productions.
     NonTerminal(String),
+    /// End-of-input marker used by the LALR compiler. It is not a user
+    /// terminal: a production that mentions the text `EOF` is an ordinary
+    /// [`Symbol::Terminal`].
+    End,
 }
 
 impl From<Symbol> for String {
     fn from(sym: Symbol) -> String {
         match sym {
-            Symbol::Terminal(s) => s,
-            Symbol::NonTerminal(s) => s,
+            Symbol::Terminal(s) | Symbol::NonTerminal(s) => s,
+            // Not `"EOF"`: that string is a legal user terminal.
+            Symbol::End => "\u{0}end".to_string(),
         }
     }
 }
@@ -229,11 +236,7 @@ impl Expr {
     /// registration becomes the start symbol) and return the nonterminal.
     /// Fails with [`CfgError`] when a repetition bound is inverted or
     /// exceeds the 100-copy cap.
-    pub fn named(
-        self,
-        name: &str,
-        registry: &mut GrammarRegistry,
-    ) -> Result<Symbol, CfgError> {
+    pub fn named(self, name: &str, registry: &mut GrammarRegistry) -> Result<Symbol, CfgError> {
         registry.register(name, self)
     }
 }
@@ -252,6 +255,10 @@ pub struct GrammarRegistry {
     /// The next fresh nonterminal name to hand out for production-level
     /// nodes (choices nested in a sequence, quantified pieces).
     next_name: usize,
+    /// Nonterminal names a fresh name must not take: the LHS being
+    /// registered, nonterminals the expression refers to, and names already
+    /// handed out. Checked before those productions exist.
+    reserved: HashSet<String>,
 }
 
 impl GrammarRegistry {
@@ -262,6 +269,7 @@ impl GrammarRegistry {
             start_symbol: None,
             terminals: HashSet::new(),
             next_name: 0,
+            reserved: HashSet::new(),
         }
     }
 
@@ -275,6 +283,8 @@ impl GrammarRegistry {
     /// 100-copy cap or an inverted `between` bound — the same checks the
     /// `Pattern` front end applies at compile time.
     pub fn register(&mut self, name: &str, expr: Expr) -> Result<Symbol, CfgError> {
+        self.reserved.insert(name.to_string());
+        reserve_refs(&expr, &mut self.reserved);
         let lhs = Symbol::NonTerminal(name.to_string());
         let rhs_list = match expr {
             Expr::Choice(choices) => choices
@@ -298,19 +308,20 @@ impl GrammarRegistry {
         loop {
             self.next_name += 1;
             let name = format!("N{}", self.next_name);
-            let taken = self
-                .productions
-                .iter()
-                .any(|(lhs, _)| *lhs == Symbol::NonTerminal(name.clone()))
-                || self.start_symbol.as_ref() == Some(&Symbol::NonTerminal(name.clone()));
+            let symbol = Symbol::NonTerminal(name.clone());
+            let taken = self.reserved.contains(&name)
+                || self.productions.iter().any(|(lhs, _)| lhs == &symbol)
+                || self.start_symbol.as_ref() == Some(&symbol);
             if !taken {
+                self.reserved.insert(name.clone());
                 return name;
             }
         }
     }
 
     fn push_production(&mut self, lhs: &str, rhs: Vec<Symbol>) {
-        self.productions.push((Symbol::NonTerminal(lhs.to_string()), rhs));
+        self.productions
+            .push((Symbol::NonTerminal(lhs.to_string()), rhs));
     }
 
     /// Lower `expr` to a symbol list, registering the fresh nonterminals
@@ -321,7 +332,13 @@ impl GrammarRegistry {
     /// compile to conflict-equivalent grammars.
     fn lower(&mut self, expr: Expr) -> Result<Vec<Symbol>, CfgError> {
         match expr {
-            Expr::Terminal(s) => Ok(vec![Symbol::Terminal(s)]),
+            Expr::Terminal(s) => {
+                if s.is_empty() {
+                    return Err(CfgError::new("empty terminal"));
+                }
+                self.terminals.insert(s.clone());
+                Ok(vec![Symbol::Terminal(s)])
+            }
             Expr::NonTerminal(s) => Ok(vec![Symbol::NonTerminal(s)]),
             Expr::Empty => Ok(vec![]),
             Expr::Sequence(exprs) => {
@@ -449,33 +466,29 @@ impl GrammarRegistry {
 
     /// Parse a right-hand-side string: quoted = terminal, `|` = choice,
     /// whitespace = sequence, `epsilon` = empty, anything else = nonterminal.
+    ///
+    /// `;`, `|`, whitespace, and `->` split tokens only outside quotes.
+    /// Inside a quote, `\\` and `\"` are escapes. Panics on an unclosed
+    /// quote or an empty terminal; [`parse_rhs`] returns those as errors.
     pub fn expr(input: &str) -> Expr {
-        let t = input.trim();
-        // A quoted token ("...") is a terminal. Its content is the pattern:
-        //   "any"      -> any double-quoted string (matched as one unit)
-        //   [..]/[..]+ -> character class (optionally a maximal-munch run)
-        //   anything   -> an as-is literal
-        // An unquoted token is a non-terminal (the old case convention is gone).
-        if t.len() >= 2
-            && t.starts_with('"')
-            && t.ends_with('"')
-            && !t[1..t.len() - 1].contains('"')
-        {
-            let content: String = t.chars().skip(1).take(t.chars().count() - 2).collect();
-            return Expr::Terminal(content);
+        parse_rhs(input).expect("grammar expression")
+    }
+}
+
+fn reserve_refs(expr: &Expr, reserved: &mut HashSet<String>) {
+    match expr {
+        Expr::NonTerminal(name) => {
+            reserved.insert(name.clone());
         }
-        if t.contains('|') {
-            let choices = t.split('|').map(|s| Self::expr(s.trim())).collect();
-            return Expr::Choice(choices);
+        Expr::Sequence(xs) | Expr::Choice(xs) => {
+            for item in xs {
+                reserve_refs(item, reserved);
+            }
         }
-        if t.contains(' ') {
-            let parts = t.split_whitespace().map(Self::expr).collect();
-            return Expr::Sequence(parts);
+        Expr::Star(inner) | Expr::Plus(inner) | Expr::Opt(inner) | Expr::Bound(inner, _, _) => {
+            reserve_refs(inner, reserved);
         }
-        if t == "epsilon" {
-            return Expr::Empty;
-        }
-        Expr::NonTerminal(t.to_string())
+        Expr::Terminal(_) | Expr::Empty => {}
     }
 }
 
@@ -548,11 +561,7 @@ impl NamedExpr {
     }
 
     /// Register under `name` (first registration becomes the start symbol).
-    pub fn named(
-        self,
-        name: &str,
-        registry: &mut GrammarRegistry,
-    ) -> Result<Symbol, CfgError> {
+    pub fn named(self, name: &str, registry: &mut GrammarRegistry) -> Result<Symbol, CfgError> {
         self.expr.named(name, registry)
     }
 }
@@ -572,4 +581,470 @@ pub fn expr(input: &str) -> NamedExpr {
     NamedExpr {
         expr: GrammarRegistry::expr(input),
     }
+}
+
+/// Parse one right-hand side. Fails on an unclosed quote, a dangling
+/// escape, or an empty quoted terminal.
+pub(crate) fn parse_rhs(input: &str) -> Result<Expr, CfgError> {
+    let choices = split_outside_quotes(input, '|')?;
+    if choices.len() > 1 {
+        let mut alts = Vec::new();
+        for choice in choices {
+            alts.push(parse_sequence_rhs(&choice)?);
+        }
+        return Ok(Expr::Choice(alts));
+    }
+    parse_sequence_rhs(input)
+}
+
+fn parse_sequence_rhs(input: &str) -> Result<Expr, CfgError> {
+    let parts = split_whitespace_outside_quotes(input)?;
+    if parts.is_empty() {
+        return Ok(Expr::NonTerminal(String::new()));
+    }
+    if parts.len() == 1 {
+        return parse_symbol_token(&parts[0]);
+    }
+    let mut seq = Vec::new();
+    for part in parts {
+        seq.push(parse_symbol_token(&part)?);
+    }
+    Ok(Expr::Sequence(seq))
+}
+
+fn parse_symbol_token(token: &str) -> Result<Expr, CfgError> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Ok(Expr::NonTerminal(String::new()));
+    }
+    if token == "epsilon" {
+        return Ok(Expr::Empty);
+    }
+    if token.starts_with('"') {
+        let chars: Vec<char> = token.chars().collect();
+        let (content, next) = scan_quoted(&chars, 0)?;
+        if next != chars.len() {
+            return Err(CfgError::new(format!(
+                "trailing input after terminal: {}",
+                chars[next..].iter().collect::<String>()
+            )));
+        }
+        if content.is_empty() {
+            return Err(CfgError::new("empty terminal"));
+        }
+        return Ok(Expr::Terminal(content));
+    }
+    Ok(Expr::NonTerminal(token.to_string()))
+}
+
+/// Split a grammar into `(lhs, rhs)` productions. Separators and the `->`
+/// arrow are recognized only outside quotes.
+pub(crate) fn split_grammar(grammar: &str) -> Result<Vec<(String, String)>, CfgError> {
+    let mut productions = Vec::new();
+    for piece in split_outside_quotes(grammar, ';')? {
+        let piece = piece.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        let (lhs, rhs) = split_arrow(piece)?;
+        if lhs.is_empty() {
+            return Err(CfgError::new(format!("Invalid production: {piece}")));
+        }
+        productions.push((lhs, rhs));
+    }
+    Ok(productions)
+}
+
+fn split_arrow(production: &str) -> Result<(String, String), CfgError> {
+    let chars: Vec<char> = production.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' {
+            let (_, next) = scan_quoted(&chars, i)?;
+            i = next;
+            continue;
+        }
+        if chars[i] == '-' && i + 1 < chars.len() && chars[i + 1] == '>' {
+            let lhs: String = chars[..i].iter().collect();
+            let rhs: String = chars[i + 2..].iter().collect();
+            return Ok((lhs.trim().to_string(), rhs.trim().to_string()));
+        }
+        i += 1;
+    }
+    Err(CfgError::new(format!("Invalid production: {production}")))
+}
+
+fn split_outside_quotes(input: &str, sep: char) -> Result<Vec<String>, CfgError> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' {
+            let (_, next) = scan_quoted(&chars, i)?;
+            i = next;
+            continue;
+        }
+        if chars[i] == sep {
+            parts.push(chars[start..i].iter().collect());
+            i += 1;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    parts.push(chars[start..].iter().collect());
+    Ok(parts)
+}
+
+fn split_whitespace_outside_quotes(input: &str) -> Result<Vec<String>, CfgError> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if chars[i] == '"' {
+            let (_, next) = scan_quoted(&chars, i)?;
+            parts.push(chars[i..next].iter().collect());
+            i = next;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && !chars[i].is_whitespace() {
+            if chars[i] == '"' {
+                break;
+            }
+            i += 1;
+        }
+        parts.push(chars[start..i].iter().collect());
+    }
+    Ok(parts)
+}
+
+/// `i` points at the opening quote. Returns the unescaped content and the
+/// index just past the closing quote.
+fn scan_quoted(chars: &[char], i: usize) -> Result<(String, usize), CfgError> {
+    let mut j = i + 1;
+    let mut content = String::new();
+    while j < chars.len() {
+        match chars[j] {
+            '\\' => {
+                if j + 1 >= chars.len() {
+                    return Err(CfgError::new("dangling escape in terminal"));
+                }
+                content.push(chars[j + 1]);
+                j += 2;
+            }
+            '"' => return Ok((content, j + 1)),
+            ch => {
+                content.push(ch);
+                j += 1;
+            }
+        }
+    }
+    Err(CfgError::new("unclosed quote in grammar"))
+}
+
+#[derive(Clone)]
+enum TermKind {
+    Any,
+    ClassRun(HashSet<char>),
+    Positive(HashSet<char>),
+    Negated(HashSet<char>),
+    Literal,
+}
+
+fn classify_terminal(term: &str) -> Result<TermKind, CfgError> {
+    if term.is_empty() {
+        return Err(CfgError::new("empty terminal"));
+    }
+    if term == "any" {
+        return Ok(TermKind::Any);
+    }
+    let chars: Vec<char> = term.chars().collect();
+    if chars.len() >= 4
+        && chars[0] == '['
+        && chars[chars.len() - 1] == '+'
+        && chars[chars.len() - 2] == ']'
+    {
+        let inner: String = chars[1..chars.len() - 2].iter().collect();
+        let members =
+            crate::lexer::parse_class_members(&inner).map_err(|message| CfgError::new(message))?;
+        return Ok(TermKind::ClassRun(members));
+    }
+    if chars.len() >= 4 && chars[0] == '[' && chars[1] == '^' && chars[chars.len() - 1] == ']' {
+        let inner: String = chars[2..chars.len() - 1].iter().collect();
+        let members =
+            crate::lexer::parse_class_members(&inner).map_err(|message| CfgError::new(message))?;
+        return Ok(TermKind::Negated(members));
+    }
+    if chars.len() >= 3 && chars[0] == '[' && chars[chars.len() - 1] == ']' {
+        let inner: String = chars[1..chars.len() - 1].iter().collect();
+        let members =
+            crate::lexer::parse_class_members(&inner).map_err(|message| CfgError::new(message))?;
+        if members.is_empty() {
+            return Err(CfgError::new(format!(
+                "empty character class in terminal \"{term}\""
+            )));
+        }
+        return Ok(TermKind::Positive(members));
+    }
+    Ok(TermKind::Literal)
+}
+
+fn sorted_chars(members: &HashSet<char>) -> Vec<char> {
+    let mut chars: Vec<char> = members.iter().copied().collect();
+    chars.sort();
+    chars
+}
+
+fn occurrences_are_sole(prods: &[(Symbol, Vec<Symbol>)], term: &str) -> bool {
+    let mut saw = false;
+    for (_, rhs) in prods {
+        let hits = rhs
+            .iter()
+            .filter(|sym| matches!(sym, Symbol::Terminal(name) if name == term))
+            .count();
+        if hits == 0 {
+            continue;
+        }
+        saw = true;
+        if hits != 1 || rhs.len() != 1 {
+            return false;
+        }
+    }
+    saw
+}
+
+fn push_unique(out: &mut Vec<(Symbol, Vec<Symbol>)>, prod: (Symbol, Vec<Symbol>)) {
+    if !out.iter().any(|existing| existing == &prod) {
+        out.push(prod);
+    }
+}
+
+fn emit_negated(
+    lhs: &Symbol,
+    excluded: &HashSet<char>,
+    chars: &HashSet<char>,
+    other: &str,
+    out: &mut Vec<(Symbol, Vec<Symbol>)>,
+) {
+    push_unique(
+        out,
+        (lhs.clone(), vec![Symbol::Terminal(other.to_string())]),
+    );
+    let mut included: Vec<char> = chars
+        .iter()
+        .copied()
+        .filter(|ch| !excluded.contains(ch))
+        .collect();
+    included.sort();
+    for ch in included {
+        push_unique(out, (lhs.clone(), vec![Symbol::Terminal(ch.to_string())]));
+    }
+}
+
+/// Rewrite positive classes into shared single-character terminals and
+/// negated classes into those characters plus one OTHER token. Class-runs
+/// stay lexer terminals. Also returns every terminal the lexer must know,
+/// including characters that are excluded by a negated class and therefore
+/// have no production.
+pub(crate) fn expand_classes(
+    prods: Vec<(Symbol, Vec<Symbol>)>,
+) -> Result<(Vec<(Symbol, Vec<Symbol>)>, HashSet<String>), CfgError> {
+    let mut kinds: HashMap<String, TermKind> = HashMap::new();
+    for (_, rhs) in &prods {
+        for sym in rhs {
+            if let Symbol::Terminal(term) = sym {
+                if !kinds.contains_key(term) {
+                    kinds.insert(term.clone(), classify_terminal(term)?);
+                }
+            }
+        }
+    }
+
+    let mut class_run_chars: HashSet<char> = HashSet::new();
+    let mut positive: HashMap<String, HashSet<char>> = HashMap::new();
+    let mut negated: HashMap<String, HashSet<char>> = HashMap::new();
+    for (name, kind) in &kinds {
+        match kind {
+            TermKind::ClassRun(members) => class_run_chars.extend(members.iter().copied()),
+            TermKind::Positive(members) => {
+                positive.insert(name.clone(), members.clone());
+            }
+            TermKind::Negated(members) => {
+                negated.insert(name.clone(), members.clone());
+            }
+            TermKind::Any | TermKind::Literal => {}
+        }
+    }
+
+    let mut nt_id = 0;
+    let mut fresh_nt = || {
+        nt_id += 1;
+        format!("\u{0}C{nt_id}")
+    };
+
+    let mut inline_pos: HashSet<String> = HashSet::new();
+    let mut pos_nt: HashMap<String, String> = HashMap::new();
+    for term in positive.keys() {
+        if occurrences_are_sole(&prods, term) {
+            inline_pos.insert(term.clone());
+        } else {
+            pos_nt.insert(term.clone(), fresh_nt());
+        }
+    }
+
+    let mut expanded: Vec<(Symbol, Vec<Symbol>)> = Vec::new();
+    for (lhs, rhs) in &prods {
+        if let [Symbol::Terminal(term)] = rhs.as_slice() {
+            if inline_pos.contains(term) {
+                for ch in sorted_chars(&positive[term]) {
+                    push_unique(
+                        &mut expanded,
+                        (lhs.clone(), vec![Symbol::Terminal(ch.to_string())]),
+                    );
+                }
+                continue;
+            }
+        }
+        let new_rhs = rhs
+            .iter()
+            .map(|sym| match sym {
+                Symbol::Terminal(term) => {
+                    if let Some(name) = pos_nt.get(term) {
+                        Symbol::NonTerminal(name.clone())
+                    } else {
+                        sym.clone()
+                    }
+                }
+                other => other.clone(),
+            })
+            .collect();
+        expanded.push((lhs.clone(), new_rhs));
+    }
+    for (term, name) in &pos_nt {
+        let lhs = Symbol::NonTerminal(name.clone());
+        for ch in sorted_chars(&positive[term]) {
+            push_unique(
+                &mut expanded,
+                (lhs.clone(), vec![Symbol::Terminal(ch.to_string())]),
+            );
+        }
+    }
+
+    let mut inline_neg: HashSet<String> = HashSet::new();
+    let mut neg_nt: HashMap<String, String> = HashMap::new();
+    for term in negated.keys() {
+        if occurrences_are_sole(&expanded, term) {
+            inline_neg.insert(term.clone());
+        } else {
+            neg_nt.insert(term.clone(), fresh_nt());
+        }
+    }
+
+    let mut char_terms: HashSet<char> = HashSet::new();
+    for (_, rhs) in &expanded {
+        for sym in rhs {
+            if let Symbol::Terminal(term) = sym {
+                if term.chars().count() == 1 {
+                    char_terms.extend(term.chars());
+                } else if term != "any" && !term.starts_with('[') {
+                    for ch in term.chars() {
+                        if !class_run_chars.contains(&ch) {
+                            char_terms.insert(ch);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !negated.is_empty() {
+        for excluded in negated.values() {
+            for ch in excluded {
+                if !class_run_chars.contains(ch) {
+                    char_terms.insert(*ch);
+                }
+            }
+        }
+    }
+
+    let other = if negated.is_empty() {
+        None
+    } else {
+        let mut name = "\u{0}other".to_string();
+        let mut taken = HashSet::new();
+        for (_, rhs) in &expanded {
+            for sym in rhs {
+                if let Symbol::Terminal(term) = sym {
+                    taken.insert(term.clone());
+                }
+            }
+        }
+        while taken.contains(&name) || char_terms.iter().any(|ch| ch.to_string() == name) {
+            name.push('\u{0}');
+        }
+        Some(name)
+    };
+
+    let mut rewritten = Vec::new();
+    for (lhs, rhs) in expanded {
+        if let [Symbol::Terminal(term)] = rhs.as_slice() {
+            if inline_neg.contains(term) {
+                emit_negated(
+                    &lhs,
+                    &negated[term],
+                    &char_terms,
+                    other.as_deref().expect("negated class has an OTHER token"),
+                    &mut rewritten,
+                );
+                continue;
+            }
+        }
+        let new_rhs = rhs
+            .into_iter()
+            .map(|sym| match &sym {
+                Symbol::Terminal(term) => {
+                    if let Some(name) = neg_nt.get(term) {
+                        Symbol::NonTerminal(name.clone())
+                    } else {
+                        sym
+                    }
+                }
+                _ => sym,
+            })
+            .collect();
+        rewritten.push((lhs, new_rhs));
+    }
+    if let Some(other_name) = &other {
+        for (term, name) in &neg_nt {
+            let lhs = Symbol::NonTerminal(name.clone());
+            emit_negated(
+                &lhs,
+                &negated[term],
+                &char_terms,
+                other_name,
+                &mut rewritten,
+            );
+        }
+    }
+
+    let mut terminals = HashSet::new();
+    for (_, rhs) in &rewritten {
+        for sym in rhs {
+            if let Symbol::Terminal(term) = sym {
+                terminals.insert(term.clone());
+            }
+        }
+    }
+    for ch in &char_terms {
+        terminals.insert(ch.to_string());
+    }
+    if let Some(other_name) = &other {
+        terminals.insert(other_name.clone());
+    }
+    Ok((rewritten, terminals))
 }

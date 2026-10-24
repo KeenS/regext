@@ -48,7 +48,9 @@ fn main() {
     let mut registry = GrammarRegistry::new();
     let _e = expr(r#"E "plus" T | T"#).named("E", &mut registry).unwrap();
     let _t = expr(r#"T "star" F | F"#).named("T", &mut registry).unwrap();
-    let _f = expr(r#""lparen" E "rparen" | "num""#).named("F", &mut registry).unwrap();
+    let _f = expr(r#""lparen" E "rparen" | "num""#)
+        .named("F", &mut registry)
+        .unwrap();
 
     let table = LRCompiler::compile::<String>(&registry);
     assert_eq!(

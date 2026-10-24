@@ -41,6 +41,9 @@ impl From<Symbol> for MySymbol {
                 "F_prime" => MySymbol::FPrime,
                 _ => panic!("Unknown non-terminal: {}", n),
             },
+            // The compiler stores end-of-input as a missing lookahead, so
+            // this arm is only here to keep the match exhaustive.
+            Symbol::End => MySymbol::Eof,
         }
     }
 }
@@ -87,7 +90,9 @@ fn main() {
     let mut reg_math = GrammarRegistry::new();
     expr(r#"E "+" T | T"#).named("E", &mut reg_math).unwrap();
     expr(r#"T "*" F | F"#).named("T", &mut reg_math).unwrap();
-    expr(r#""(" E ")" | "n""#).named("F", &mut reg_math).unwrap();
+    expr(r#""(" E ")" | "n""#)
+        .named("F", &mut reg_math)
+        .unwrap();
 
     let table = LRCompiler::compile::<MySymbol>(&reg_math);
     let math_input = vec![

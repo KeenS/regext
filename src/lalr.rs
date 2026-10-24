@@ -58,12 +58,35 @@ use crate::grammar::{GrammarRegistry, Symbol};
 struct Item {
     prod_idx: usize,
     dot: usize,
-    /// Lookahead symbol; `Symbol::Terminal("EOF")` is the end-marker.
+    /// Lookahead symbol; [`Symbol::End`] is the end-marker. A user terminal
+    /// whose text is `EOF` is an ordinary [`Symbol::Terminal`] and is not
+    /// this marker.
     look: Symbol,
 }
 
 fn eof() -> Symbol {
-    Symbol::Terminal("EOF".to_string())
+    Symbol::End
+}
+
+/// Augmented start symbol. Its name cannot be one a user production already
+/// uses, so a nonterminal such as `S_prime` does not become the augmented
+/// start.
+fn augmented_start(prods: &[(Symbol, Vec<Symbol>)], start: &Symbol) -> Symbol {
+    let base = match start {
+        Symbol::NonTerminal(name) | Symbol::Terminal(name) => name.as_str(),
+        Symbol::End => "start",
+    };
+    let mut name = format!("{base}\u{0}");
+    loop {
+        let candidate = Symbol::NonTerminal(name.clone());
+        let taken = prods
+            .iter()
+            .any(|(lhs, rhs)| lhs == &candidate || rhs.iter().any(|sym| sym == &candidate));
+        if !taken {
+            return candidate;
+        }
+        name.push('\u{0}');
+    }
 }
 
 /// A compiled LALR(1) table over symbol type `S`; implements
@@ -120,6 +143,10 @@ fn first_of_seq(
             all_nullable = false;
             break;
         }
+        if let Symbol::End = sym {
+            all_nullable = false;
+            break;
+        }
         if let Some(f) = first.get(sym) {
             out.extend(f.iter().cloned());
         }
@@ -152,9 +179,7 @@ fn lalr_closure(
             look,
         } = cl[i].clone();
         let rhs = &prods[prod_idx].1;
-        if dot < rhs.len()
-            && let Symbol::NonTerminal(_) = &rhs[dot]
-        {
+        if dot < rhs.len() && matches!(rhs[dot], Symbol::NonTerminal(_)) {
             let looks = first_of_seq(&rhs[dot + 1..], &look, first, nullable);
             for (idx, (lhs, _)) in prods.iter().enumerate() {
                 if lhs == &rhs[dot] {
@@ -190,13 +215,7 @@ impl LRCompiler {
     {
         let start_sym = registry.start_symbol.as_ref().expect("No start symbol");
         let mut prods = registry.productions.clone();
-        let start_sym_augmented = Symbol::NonTerminal(format!(
-            "{}_prime",
-            match start_sym {
-                Symbol::NonTerminal(n) => n,
-                Symbol::Terminal(n) => n,
-            }
-        ));
+        let start_sym_augmented = augmented_start(&prods, start_sym);
         prods.insert(0, (start_sym_augmented.clone(), vec![start_sym.clone()]));
 
         let productions_vec: Vec<Production<S>> = prods
@@ -219,6 +238,10 @@ impl LRCompiler {
                 for sym in rhs.iter() {
                     if let Symbol::Terminal(_) = sym {
                         first.entry(lhs.clone()).or_default().insert(sym.clone());
+                        all_nullable = false;
+                        break;
+                    }
+                    if let Symbol::End = sym {
                         all_nullable = false;
                         break;
                     }
@@ -325,7 +348,8 @@ impl LRCompiler {
         // -- actions and goto --
         let mut action_table: HashMap<(usize, Option<S>), Action> = HashMap::new();
         let mut goto_table: HashMap<(usize, S), usize> = HashMap::new();
-        let mut conflicts: usize = 0;
+        // One entry per (state, symbol) slot, however many actions collided there.
+        let mut conflicted: HashSet<(usize, Option<S>)> = HashSet::new();
         for (st, items) in lalr_states.iter().enumerate() {
             let mut sorted: Vec<&Item> = items.iter().collect();
             sorted.sort();
@@ -338,16 +362,12 @@ impl LRCompiler {
                         Symbol::Terminal(_) => {
                             let k = (st, Some(S::from(sym.clone())));
                             let a = Action::Shift(target);
-                            if action_table.get(&k) != Some(&a) {
-                                if action_table.contains_key(&k) {
-                                    conflicts += 1;
-                                }
-                                action_table.insert(k, a);
-                            }
+                            note_action(&mut action_table, &mut conflicted, k, a);
                         }
                         Symbol::NonTerminal(_) => {
                             goto_table.insert((st, S::from(sym.clone())), target);
                         }
+                        Symbol::End => {}
                     }
                 } else {
                     let a = if it.prod_idx == 0 && it.look == eof() {
@@ -360,12 +380,7 @@ impl LRCompiler {
                     } else {
                         (st, Some(S::from(it.look.clone())))
                     };
-                    if action_table.get(&k) != Some(&a) {
-                        if action_table.contains_key(&k) {
-                            conflicts += 1;
-                        }
-                        action_table.insert(k, a);
-                    }
+                    note_action(&mut action_table, &mut conflicted, k, a);
                 }
             }
         }
@@ -374,7 +389,23 @@ impl LRCompiler {
             action: action_table,
             goto: goto_table,
             productions: productions_vec,
-            conflicts,
+            conflicts: conflicted.len(),
         }
+    }
+}
+
+fn note_action<S>(
+    action_table: &mut HashMap<(usize, Option<S>), Action>,
+    conflicted: &mut HashSet<(usize, Option<S>)>,
+    key: (usize, Option<S>),
+    action: Action,
+) where
+    S: Clone + Eq + std::hash::Hash,
+{
+    if action_table.get(&key) != Some(&action) {
+        if action_table.contains_key(&key) {
+            conflicted.insert(key.clone());
+        }
+        action_table.insert(key, action);
     }
 }

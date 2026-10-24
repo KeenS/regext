@@ -38,6 +38,59 @@ fn assert_parity(comp: &Regex, str_re: &Regex, battery: &[&str]) {
 // =============================================================================
 
 #[test]
+fn composable_adjacent_literals_are_one_terminal() {
+    // `ab` is one literal. `lit("a").then(lit("b"))` is the same terminal,
+    // so a space between the letters is not skipped. A quantifier stops
+    // the merge: `a` then `b*` stays two terminals and still skips the space.
+    let ab = Regex::from_pattern(Pattern::lit("a").then(Pattern::lit("b"))).unwrap();
+    let ab_str = Regex::new("ab").unwrap();
+    assert_parity(&ab, &ab_str, &["", "a", "b", "ab", "a b", "ba"]);
+    assert!(ab.is_match("ab"));
+    assert!(!ab.is_match("a b"));
+
+    let star = Regex::from_pattern(Pattern::lit("a").then(Pattern::lit("b").star())).unwrap();
+    let star_str = Regex::new("ab*").unwrap();
+    assert_parity(&star, &star_str, &["", "a", "ab", "abb", "a b", "b"]);
+    assert!(star.is_match("a"));
+    assert!(star.is_match("ab"));
+    assert!(star.is_match("a b"));
+    assert!(!star.is_match("b"));
+
+    // Three adjacent literals stay one terminal, including a quoted pipe.
+    let abc = Regex::from_pattern(
+        Pattern::lit("a")
+            .then(Pattern::lit("b"))
+            .then(Pattern::lit("c")),
+    )
+    .unwrap();
+    let abc_str = Regex::new("abc").unwrap();
+    assert_parity(&abc, &abc_str, &["abc", "abc ", "a b c", "ab c", "a bc"]);
+
+    let pipe = Regex::from_pattern(
+        Pattern::lit("a")
+            .then(Pattern::lit("|"))
+            .then(Pattern::lit("b")),
+    )
+    .unwrap();
+    let pipe_str = Regex::new(r"a\|b").unwrap();
+    assert_parity(&pipe, &pipe_str, &["a|b", "ab", "a | b"]);
+
+    // Alternation stops the merge: `(a|b)c` is two terminals.
+    let alt = Regex::from_pattern(
+        Pattern::lit("a")
+            .or(Pattern::lit("b"))
+            .then(Pattern::lit("c")),
+    )
+    .unwrap();
+    let alt_str = Regex::new("(?:a|b)c").unwrap();
+    assert_parity(
+        &alt,
+        &alt_str,
+        &["", "a", "c", "ac", "bc", "a c", "abc", "ab"],
+    );
+}
+
+#[test]
 fn composable_literals_or_then() {
     let battery = ["", "a", "b", "ab", "aabb", "ba", "c"];
     let comp = Regex::from_pattern(
@@ -284,6 +337,12 @@ fn composable_rejections() {
         Err(RegexError::CompileError(msg)) => assert!(msg.contains("conflict"), "{msg}"),
         Err(RegexError::InvalidPattern(msg)) => panic!("expected CompileError, got {msg}"),
     }
+    // `a**` through the composable front end is the same non-LALR grammar.
+    match Regex::from_pattern(Pattern::lit("a").star().star()) {
+        Ok(_) => panic!("star().star() must be a CompileError"),
+        Err(RegexError::CompileError(_)) => {}
+        Err(RegexError::InvalidPattern(msg)) => panic!("expected CompileError, got {msg}"),
+    }
 }
 
 // =============================================================================
@@ -433,7 +492,8 @@ fn named_expr_or_then() {
     RegExt::expr("G").named("S", &mut registry).unwrap();
     RegExt::expr(r#""a" | "b""#)
         .or(Expr::str("c"))
-        .named("G", &mut registry).unwrap();
+        .named("G", &mut registry)
+        .unwrap();
     let parser = CfgParser::from_registry(registry).unwrap();
     assert!(parser.is_match("a"));
     assert!(parser.is_match("c"));
@@ -447,12 +507,7 @@ fn named_expr_or_then() {
 
 /// Compare two CFG parsers over a battery: `is_match` and `find` (and
 /// `captures` for the given group names).
-fn assert_parity_cfg(
-    comp: &CfgParser,
-    str_parser: &CfgParser,
-    battery: &[&str],
-    groups: &[&str],
-) {
+fn assert_parity_cfg(comp: &CfgParser, str_parser: &CfgParser, battery: &[&str], groups: &[&str]) {
     for t in battery {
         assert_eq!(comp.is_match(t), str_parser.is_match(t), "is_match({t:?})");
         assert_eq!(comp.find(t), str_parser.find(t), "find({t:?})");
@@ -517,10 +572,7 @@ fn expr_quantifiers_match_string_grammar() {
     Expr::str("a").times(0).named("S", &mut reg).unwrap();
     assert!(CfgParser::from_registry(reg).unwrap().is_match(""));
     let mut reg = GrammarRegistry::new();
-    Expr::str("a")
-        .between(0, 2)
-        .named("S", &mut reg)
-        .unwrap();
+    Expr::str("a").between(0, 2).named("S", &mut reg).unwrap();
     let comp = CfgParser::from_registry(reg).unwrap();
     let str_parser = CfgParser::new(r#"A -> epsilon | "a" | "a" "a""#).unwrap();
     assert_parity_cfg(&comp, &str_parser, &battery, &[]);
@@ -551,24 +603,23 @@ fn expr_grouped_choice_in_sequence() {
         .named("S", &mut reg)
         .unwrap();
     let comp = CfgParser::from_registry(reg).unwrap();
-    let str_parser =
-        CfgParser::new(r#"S -> G S | G; G -> "a" "b" | "c""#).unwrap();
+    let str_parser = CfgParser::new(r#"S -> G S | G; G -> "a" "b" | "c""#).unwrap();
     assert_parity_cfg(&comp, &str_parser, &battery, &[]);
 
     // (a|b)* — a quantified choice of literals.
     let mut reg = GrammarRegistry::new();
-    Expr::str("a").or(Expr::str("b")).star().named("S", &mut reg).unwrap();
+    Expr::str("a")
+        .or(Expr::str("b"))
+        .star()
+        .named("S", &mut reg)
+        .unwrap();
     let comp = CfgParser::from_registry(reg).unwrap();
     let str_parser = CfgParser::new(r#"S -> G S | epsilon; G -> "a" | "b""#).unwrap();
     assert_parity_cfg(&comp, &str_parser, &battery, &[]);
 
     // Nested quantifiers: (a*)* = a*.
     let mut reg = GrammarRegistry::new();
-    Expr::str("a")
-        .star()
-        .star()
-        .named("S", &mut reg)
-        .unwrap();
+    Expr::str("a").star().star().named("S", &mut reg).unwrap();
     let comp = CfgParser::from_registry(reg).unwrap();
     let str_parser = CfgParser::new(r#"A -> "a" A | epsilon"#).unwrap();
     assert_parity_cfg(&comp, &str_parser, &["", "a", "aa", "aaa", "b"], &[]);
@@ -576,7 +627,7 @@ fn expr_grouped_choice_in_sequence() {
 
 #[test]
 fn expr_classes_and_aliases() {
-    let battery = ["", "1", "42", "1a", "12345", "x", "é"];
+    let battery = ["", "1", "42", "1a", "12345", "x", "é", " 1 ", "1 2"];
     let mut reg = GrammarRegistry::new();
     Expr::digit().plus().named("S", &mut reg).unwrap();
     let comp = CfgParser::from_registry(reg).unwrap();
@@ -585,10 +636,7 @@ fn expr_classes_and_aliases() {
 
     let battery = ["", "a", "z", "q7", "9", "0", "_x", "é", " 7 "];
     let mut reg = GrammarRegistry::new();
-    Expr::neg_class("0-9")
-        .star()
-        .named("S", &mut reg)
-        .unwrap();
+    Expr::neg_class("0-9").star().named("S", &mut reg).unwrap();
     let comp = CfgParser::from_registry(reg).unwrap();
     let str_parser = CfgParser::new(r#"S -> "[^0-9]" S | epsilon"#).unwrap();
     assert_parity_cfg(&comp, &str_parser, &battery, &[]);
@@ -618,10 +666,7 @@ fn expr_bound_rejections() {
     // Inverted or over-cap bounds are refused at registration — the CFG
     // analog of `RegexError::InvalidPattern` for the `Pattern` front end.
     let mut reg = GrammarRegistry::new();
-    let err = Expr::str("a")
-        .times(101)
-        .named("S", &mut reg)
-        .unwrap_err();
+    let err = Expr::str("a").times(101).named("S", &mut reg).unwrap_err();
     assert!(err.to_string().contains("101"), "{}", err);
     let mut reg = GrammarRegistry::new();
     let err = Expr::str("a")
@@ -634,20 +679,38 @@ fn expr_bound_rejections() {
         .between(3, 2)
         .named("S", &mut reg)
         .unwrap_err();
-    assert!(err.to_string().contains("upper bound below its lower"), "{err}");
+    assert!(
+        err.to_string().contains("upper bound below its lower"),
+        "{err}"
+    );
     // A refused registration leaves no production behind.
     assert!(reg.productions.is_empty());
     // The 100-copy cap itself still compiles.
     let mut reg = GrammarRegistry::new();
     Expr::str("a").times(100).named("S", &mut reg).unwrap();
     assert!(reg.productions.iter().any(|(_, rhs)| rhs.len() == 100));
+    // An empty terminal is refused at registration and leaves no production.
+    let mut reg = GrammarRegistry::new();
+    let err = Expr::str("").named("S", &mut reg).unwrap_err();
+    assert!(err.to_string().contains("empty"), "{err}");
+    assert!(reg.productions.is_empty());
+    // An inverted class is stored as a terminal and rejected when compiled.
+    let mut reg = GrammarRegistry::new();
+    Expr::class("z-a").named("S", &mut reg).unwrap();
+    match CfgParser::from_registry(reg) {
+        Ok(_) => panic!("an inverted class must be rejected at compile"),
+        Err(err) => assert!(err.to_string().contains("inverted"), "{err}"),
+    }
 }
 
 #[test]
 fn named_expr_quantifiers() {
     // `expr(...)` string pieces take the quantifier combinators too.
     let mut reg = GrammarRegistry::new();
-    RegExt::expr(r#""a" | "b""#).star().named("S", &mut reg).unwrap();
+    RegExt::expr(r#""a" | "b""#)
+        .star()
+        .named("S", &mut reg)
+        .unwrap();
     let parser = CfgParser::from_registry(reg).unwrap();
     assert!(parser.is_match(""));
     assert!(parser.is_match("abba"));
@@ -674,40 +737,21 @@ fn cfg_expr_parity_with_pattern() {
     // language — `Pattern` (regex front end) and `Expr` (CFG front end).
     let battery = ["", "a", "aa", "aaa", "b", "ab", "ba", "c"];
     let cases: Vec<(Expr, Pattern)> = vec![
-        (
-            Expr::str("a").star(),
-            Pattern::lit("a").star(),
-        ),
-        (
-            Expr::str("a").plus(),
-            Pattern::lit("a").plus(),
-        ),
-        (
-            Expr::str("a").opt(),
-            Pattern::lit("a").opt(),
-        ),
-        (
-            Expr::str("a").times(2),
-            Pattern::lit("a").times(2),
-        ),
-        (
-            Expr::str("a").at_least(2),
-            Pattern::lit("a").at_least(2),
-        ),
+        (Expr::str("a").star(), Pattern::lit("a").star()),
+        (Expr::str("a").plus(), Pattern::lit("a").plus()),
+        (Expr::str("a").opt(), Pattern::lit("a").opt()),
+        (Expr::str("a").times(2), Pattern::lit("a").times(2)),
+        (Expr::str("a").at_least(2), Pattern::lit("a").at_least(2)),
         (
             Expr::str("a").between(1, 3),
             Pattern::lit("a").between(1, 3),
         ),
         (
-            Expr::str("a")
-                .or(Expr::str("b"))
-                .star(),
+            Expr::str("a").or(Expr::str("b")).star(),
             Pattern::lit("a").or(Pattern::lit("b")).star(),
         ),
         (
-            Expr::str("a")
-                .or(Expr::str("b"))
-                .then(Expr::str("c")),
+            Expr::str("a").or(Expr::str("b")).then(Expr::str("c")),
             Pattern::lit("a")
                 .or(Pattern::lit("b"))
                 .then(Pattern::lit("c")),

@@ -1,9 +1,13 @@
 //! The maximal-munch tokenizer for grammar terminals.
 //!
 //! Given the terminal set of a grammar, the lexer scans input text and emits
-//! one [`Token`] per match, longest terminal first, skipping whitespace.
-//! Unknown characters are still emitted (as single-character tokens) so the
-//! parser can reject them precisely.
+//! one [`Token`] per match, skipping whitespace. The longest match wins. On
+//! a tie the higher rank wins: a quoted string, then a literal, then a
+//! class-run, then a positive class, then a negated class. A zero-length
+//! literal is never a match. Unknown characters are still emitted (as
+//! single-character tokens) so the parser can reject them precisely, unless
+//! the terminal set contains the negated-class fallback, which stands for
+//! every character no other terminal took.
 //!
 //! Recognized terminal shapes:
 //!
@@ -58,6 +62,9 @@ pub struct Lexer {
     literals: Vec<String>,
     char_classes: Vec<(String, HashSet<char>)>,
     negated_classes: Vec<(String, HashSet<char>)>,
+    /// Terminal emitted for a character that no literal, class, or class-run
+    /// mentions. Present only when the grammar has a negated class.
+    other: Option<String>,
 }
 
 impl Lexer {
@@ -69,8 +76,15 @@ impl Lexer {
         let mut literals = Vec::new();
         let mut char_classes = Vec::new();
         let mut negated_classes = Vec::new();
+        let mut other = None;
 
         for terminal in terminals {
+            // A leading NUL marks the synthetic "any other character" terminal
+            // introduced for negated classes. It is not a user literal.
+            if terminal.starts_with('\u{0}') {
+                other = Some(terminal);
+                continue;
+            }
             let chars: Vec<char> = terminal.chars().collect();
             if terminal == "any" {
                 // The "any" terminal is a quoted-string token: the lexer matches
@@ -115,24 +129,13 @@ impl Lexer {
             literals,
             char_classes,
             negated_classes,
+            other,
         }
     }
 
     fn parse_class(inner: &[char]) -> HashSet<char> {
-        let mut members = HashSet::new();
-        let mut i = 0;
-        while i < inner.len() {
-            if i + 2 < inner.len() && inner[i + 1] == '-' {
-                for c in inner[i]..=inner[i + 2] {
-                    members.insert(c);
-                }
-                i += 3;
-            } else {
-                members.insert(inner[i]);
-                i += 1;
-            }
-        }
-        members
+        let text: String = inner.iter().collect();
+        parse_class_members(&text).unwrap_or_default()
     }
 
     /// Tokenize and record the byte span of every token.
@@ -157,8 +160,16 @@ impl Lexer {
 
             let (symbol, next) = match self.match_symbol(&chars, i) {
                 Some(t) => t,
-                // Unknown characters are still emitted so the parser can report them.
-                None => (chars[i].to_string(), i + 1),
+                // A negated class's OTHER terminal stands for every character
+                // no literal or class mentioned. Otherwise an unknown character
+                // is still emitted so the parser can reject it precisely.
+                None => {
+                    let symbol = match &self.other {
+                        Some(other) => other.clone(),
+                        None => chars[i].to_string(),
+                    };
+                    (symbol, i + 1)
+                }
             };
             spans.push(TokenSpan {
                 token: Token::Terminal(symbol),
@@ -184,11 +195,31 @@ impl Lexer {
             .collect()
     }
 
+    /// Longest match across every terminal kind. On a tie the higher rank
+    /// wins: quoted string, then literal, then class-run, then class, then
+    /// negated class. Equal rank keeps the earlier candidate, and those
+    /// lists are sorted so the result is deterministic.
     fn match_symbol(&self, chars: &[char], i: usize) -> Option<(String, usize)> {
+        let mut best_end = i;
+        let mut best_rank: u8 = 0;
+        let mut best_sym: Option<String> = None;
+        let mut propose = |end: usize, rank: u8, sym: &str| {
+            if end <= i {
+                return;
+            }
+            let better =
+                best_sym.is_none() || end > best_end || (end == best_end && rank > best_rank);
+            if better {
+                best_end = end;
+                best_rank = rank;
+                best_sym = Some(sym.to_string());
+            }
+        };
+
         if chars[i] == '"' {
             for rule in &self.string_rules {
                 if let Some(end) = Self::quoted_end(chars, i) {
-                    return Some((rule.clone(), end));
+                    propose(end, 5, rule);
                 }
             }
         }
@@ -199,36 +230,34 @@ impl Lexer {
                 while end < chars.len() && members.contains(&chars[end]) {
                     end += 1;
                 }
-                return Some((run.clone(), end));
+                propose(end, 3, run);
             }
         }
 
         for literal in &self.literals {
             let len = literal.chars().count();
-            if i + len <= chars.len() {
-                let slice: String = chars[i..i + len].iter().collect();
-                if slice == *literal {
-                    return Some((literal.clone(), i + len));
-                }
+            if len == 0 || i + len > chars.len() {
+                continue;
+            }
+            let slice: String = chars[i..i + len].iter().collect();
+            if slice == *literal {
+                propose(i + len, 4, literal);
             }
         }
 
         for (class, members) in &self.char_classes {
             if members.contains(&chars[i]) {
-                return Some((class.clone(), i + 1));
+                propose(i + 1, 2, class);
             }
         }
 
-        // Negated classes go last among the class forms: literals and plain
-        // classes keep winning, and the membership test already excludes the
-        // set, so a literal member never tokenizes as its own negation.
         for (class, members) in &self.negated_classes {
             if !members.contains(&chars[i]) {
-                return Some((class.clone(), i + 1));
+                propose(i + 1, 1, class);
             }
         }
 
-        None
+        best_sym.map(|sym| (sym, best_end))
     }
 
     fn quoted_end(chars: &[char], i: usize) -> Option<usize> {
@@ -243,4 +272,31 @@ impl Lexer {
         }
         None
     }
+}
+
+/// Members of a class body (`a`, `a-z`, a hyphen at either edge). A range
+/// whose start sorts after its end is an error; equal endpoints are one
+/// character. `inner` is the text between the brackets, without a leading
+/// `^`.
+pub(crate) fn parse_class_members(inner: &str) -> Result<HashSet<char>, String> {
+    let chars: Vec<char> = inner.chars().collect();
+    let mut members = HashSet::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 2 < chars.len() && chars[i + 1] == '-' {
+            let start = chars[i];
+            let end = chars[i + 2];
+            if start > end {
+                return Err(format!("inverted character range '{start}-{end}' in class"));
+            }
+            for c in start..=end {
+                members.insert(c);
+            }
+            i += 3;
+        } else {
+            members.insert(chars[i]);
+            i += 1;
+        }
+    }
+    Ok(members)
 }

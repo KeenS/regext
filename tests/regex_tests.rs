@@ -2,7 +2,7 @@
 //! `find`, `captures` with group spans, and the honest rejection of
 //! patterns whose CFG encoding is not LALR(1).
 
-use RegExt::{Captures, Match, Regex, RegexError};
+use RegExt::{Captures, Match, Pattern, Regex, RegexError};
 
 fn caps(matches: Vec<Option<Match>>) -> Captures {
     Captures { matches }
@@ -25,7 +25,11 @@ fn err_of(pattern: &str) -> RegexError {
 fn test_regex_literal() {
     let re = Regex::new("a").unwrap();
     assert!(re.is_match("a"));
+    assert!(re.is_match(" a "));
     assert!(!re.is_match("b"));
+    assert!(!re.is_match(""));
+    assert_eq!(re.find(" a "), Some(Match::new(1, 2)));
+    assert_eq!(re.find("ba"), Some(Match::new(1, 2)));
 }
 
 #[test]
@@ -33,7 +37,10 @@ fn test_regex_alternation() {
     let re = Regex::new("a|b").unwrap();
     assert!(re.is_match("a"));
     assert!(re.is_match("b"));
+    assert!(re.is_match(" a "));
     assert!(!re.is_match("c"));
+    assert!(!re.is_match("ab"));
+    assert_eq!(re.find("xby"), Some(Match::new(1, 2)));
 }
 
 #[test]
@@ -42,14 +49,22 @@ fn test_regex_kleene_star() {
     assert!(re.is_match(""));
     assert!(re.is_match("a"));
     assert!(re.is_match("aa"));
+    assert!(re.is_match("   "));
+    assert!(!re.is_match("ab"));
+    assert_eq!(re.find("   "), Some(Match::new(0, 0)));
 }
 
 #[test]
 fn test_regex_plus() {
     let re = Regex::new("a+").unwrap();
     assert!(!re.is_match(""));
+    assert!(!re.is_match("   "));
     assert!(re.is_match("a"));
     assert!(re.is_match("aa"));
+    assert!(re.is_match(" a "));
+    // " ba " is space, b, a, space: the `a` is at byte 2.
+    assert_eq!(re.find(" ba "), Some(Match::new(2, 3)));
+    assert_eq!(re.find(" b a "), Some(Match::new(3, 4)));
 }
 
 #[test]
@@ -57,14 +72,23 @@ fn test_regex_optional() {
     let re = Regex::new("ab?").unwrap();
     assert!(re.is_match("a"));
     assert!(re.is_match("ab"));
+    assert!(re.is_match("a "));
+    assert!(re.is_match(" ab"));
+    // `b` is its own terminal, so a space between `a` and `b` is skipped.
+    assert!(re.is_match("a b"));
     assert!(!re.is_match("b"));
+    assert!(!re.is_match("b a"));
 }
 
 #[test]
 fn test_regex_escape() {
     let re = Regex::new(r"a\*b").unwrap();
     assert!(re.is_match("a*b"));
+    assert!(re.is_match("a*b "));
     assert!(!re.is_match("ab"));
+    // The escaped star is part of one literal, so spaces do not split it.
+    assert!(!re.is_match("a * b"));
+    assert_eq!(re.find(" a*b "), Some(Match::new(1, 4)));
 }
 
 #[test]
@@ -74,7 +98,11 @@ fn test_regex_quantifier_binds_last_char() {
     assert!(re.is_match("a"));
     assert!(re.is_match("ab"));
     assert!(re.is_match("abb"));
+    assert!(re.is_match("abb "));
+    assert!(re.is_match("a b"));
     assert!(!re.is_match("abab"));
+    assert!(!re.is_match(" ba"));
+    assert_eq!(re.find("xabb"), Some(Match::new(1, 4)));
 }
 
 #[test]
@@ -82,6 +110,9 @@ fn test_regex_grouped_repetition() {
     let re = Regex::new("(a+)(b+)").unwrap();
     assert!(re.is_match("ab"), "one of each satisfies a+ then b+");
     assert!(re.is_match("aabb"));
+    assert!(re.is_match("a b"));
+    assert!(re.is_match("aa bb"));
+    assert_eq!(re.find("xaabby"), Some(Match::new(1, 5)));
     assert!(!re.is_match("bbaa"), "b before a must not match");
     assert!(!re.is_match("aabba"), "trailing a must not match");
     assert!(!re.is_match(""), "both repetitions require at least one");
@@ -137,11 +168,15 @@ fn test_regex_rejects_dangling_escape() {
         matches!(err_of(r"a\"), RegexError::InvalidPattern(_)),
         "dangling escape must be rejected"
     );
+    assert!(
+        matches!(err_of(r"\"), RegexError::InvalidPattern(_)),
+        "a lone escape must be rejected"
+    );
 }
 
 #[test]
 fn test_regex_rejects_quantifier_without_operand() {
-    for pattern in ["*", "**", "+", "?"] {
+    for pattern in ["*", "**", "+", "?", "{", "{2}"] {
         assert!(
             matches!(err_of(pattern), RegexError::InvalidPattern(_)),
             "[{pattern}] must be rejected"
@@ -169,6 +204,10 @@ fn test_regex_rejects_non_lalr_encoding() {
 fn test_is_match_is_anchored() {
     let re = Regex::new("test").unwrap();
     assert!(re.is_match("test"));
+    // Surrounding whitespace is skipped, so it is not an extra token.
+    assert!(re.is_match(" test "));
+    assert!(re.is_match("\ttest\n"));
+    assert_eq!(re.find(" test "), Some(Match::new(1, 5)));
     assert!(!re.is_match("a test b"));
     assert!(!re.is_match("testing"));
     assert!(!re.is_match(""));
@@ -202,12 +241,19 @@ fn test_find_leftmost_position_wins() {
 fn test_find_longest_at_leftmost() {
     let re = Regex::new("a+").unwrap();
     assert_eq!(re.find("aaab"), Some(Match::new(0, 3)));
+    assert_eq!(re.find("xaaab"), Some(Match::new(1, 4)));
+    assert!(re.is_match(" aaa "));
+    assert_eq!(re.find(" aaa "), Some(Match::new(1, 4)));
 }
 
 #[test]
 fn test_find_empty_match() {
     let re = Regex::new("a*").unwrap();
     assert_eq!(re.find("bbb"), Some(Match::new(0, 0)));
+    assert_eq!(re.find(""), Some(Match::new(0, 0)));
+    assert!(re.is_match("   "));
+    // A whitespace-only slice has no tokens, so the span stays empty.
+    assert_eq!(re.find("   "), Some(Match::new(0, 0)));
 }
 
 #[test]
@@ -222,6 +268,10 @@ fn test_find_multibyte_offsets() {
     let re = Regex::new("é").unwrap();
     // 'é' is two UTF-8 bytes, so the span must be byte offsets 1..3.
     assert_eq!(re.find("aéb"), Some(Match::new(1, 3)));
+    assert_eq!(re.find("é"), Some(Match::new(0, 2)));
+    assert_eq!(re.find("éé"), Some(Match::new(0, 2)));
+    assert_eq!(re.find("aéé"), Some(Match::new(1, 3)));
+    assert!(!re.is_match("e"));
 }
 
 #[test]
@@ -231,7 +281,10 @@ fn test_find_maximal_munch_alternation() {
     let re = Regex::new("a|ab").unwrap();
     assert_eq!(re.find("a"), Some(Match::new(0, 1)));
     assert_eq!(re.find("ab"), Some(Match::new(0, 2)));
+    assert_eq!(re.find("ab "), Some(Match::new(0, 2)));
     assert_eq!(re.find("bab"), Some(Match::new(1, 3)));
+    assert!(re.is_match("ab "));
+    assert!(!re.is_match("a b"));
 }
 
 // =============================================================================
@@ -250,6 +303,11 @@ fn test_captures_without_groups() {
         re.captures("xhellox"),
         Some(caps(vec![Some(Match::new(1, 6))]))
     );
+    assert!(re.is_match(" hello "));
+    assert_eq!(
+        re.captures(" hello "),
+        Some(caps(vec![Some(Match::new(1, 6))]))
+    );
 }
 
 #[test]
@@ -260,6 +318,12 @@ fn test_captures_single_group() {
     assert_eq!(
         caps.matches,
         vec![Some(Match::new(1, 4)), Some(Match::new(2, 3))]
+    );
+    // Spaces sit between the three terminals and stay inside the spans.
+    let caps = re.captures("a b c").unwrap();
+    assert_eq!(
+        caps.matches,
+        vec![Some(Match::new(0, 5)), Some(Match::new(2, 3))]
     );
 }
 
@@ -591,7 +655,10 @@ fn test_class_literal_members() {
     assert!(re.is_match("a"));
     assert!(re.is_match("b"));
     assert!(re.is_match("c"));
+    assert!(re.is_match(" a "));
     assert!(!re.is_match("d"));
+    assert!(!re.is_match("ab"));
+    assert_eq!(re.find("xa"), Some(Match::new(1, 2)));
 }
 
 #[test]
@@ -599,16 +666,25 @@ fn test_class_ranges() {
     let re = Regex::new("[a-z]+").unwrap();
     assert!(re.is_match("abc"));
     assert!(re.is_match("z"));
+    assert!(re.is_match(" abc "));
     assert!(!re.is_match("a1"));
+    assert!(!re.is_match(""));
     // `X` is outside the class, so the leftmost match starts at `a`.
     assert_eq!(re.find("Xa12"), Some(Match::new(1, 2)));
+    assert_eq!(re.find("12ab"), Some(Match::new(2, 4)));
+    assert_eq!(re.find("éab"), Some(Match::new(2, 4)));
 }
 
 #[test]
 fn test_class_negated() {
     let re = Regex::new("[^abc]").unwrap();
     assert!(re.is_match("d"));
+    assert!(re.is_match("é"));
     assert!(!re.is_match("a"));
+    assert!(!re.is_match("abc"));
+    // Every character is excluded, and the class is not nullable.
+    assert_eq!(re.find("abc"), None);
+    assert_eq!(re.find("abx"), Some(Match::new(2, 3)));
     let re = Regex::new("[^a-z]*").unwrap();
     assert!(re.is_match("!!"));
     assert!(!re.is_match("abc"));
@@ -627,13 +703,22 @@ fn test_class_special_members() {
     assert!(re.is_match("|"));
     assert!(re.is_match("a"));
     assert!(!re.is_match("c"));
+    assert!(!re.is_match("a|b"));
+    assert_eq!(re.find("x|y"), Some(Match::new(1, 2)));
+    let semi = Regex::new("[a;b]").unwrap();
+    assert!(semi.is_match(";"));
+    assert!(semi.is_match("a"));
 }
 
 #[test]
 fn test_class_quantifiers() {
     let re = Regex::new("[a-z]{2}").unwrap();
     assert!(re.is_match("ab"));
+    // Two class terminals: the space between them is skipped and covered.
+    assert!(re.is_match("a b"));
+    assert_eq!(re.find("a b"), Some(Match::new(0, 3)));
     assert!(!re.is_match("a"));
+    assert!(!re.is_match("a  "));
     assert!(!re.is_match("abc"));
     // `X` is outside the class, so the two-class-char match starts at `a`.
     assert_eq!(re.find("Xabc"), Some(Match::new(1, 3)));
@@ -900,10 +985,14 @@ fn test_possessive_quantifiers() {
     let star = Regex::new("a*+").unwrap();
     assert!(star.is_match(""));
     assert!(star.is_match("aa"));
+    assert!(star.is_match("  aa "));
+    // `a*` is nullable, so the empty match at 0 beats `aa` further right.
+    assert_eq!(star.find("xaa"), Some(Match::new(0, 0)));
     let plus = Regex::new("a++").unwrap();
     assert!(plus.is_match("a"));
     assert!(plus.is_match("aa"));
     assert!(!plus.is_match(""));
+    assert_eq!(plus.find("xaa"), Some(Match::new(1, 3)));
     let opt = Regex::new("a?+b").unwrap();
     assert!(opt.is_match("ab"));
     assert!(opt.is_match("b"));
@@ -911,15 +1000,270 @@ fn test_possessive_quantifiers() {
     let class = Regex::new("x[a-z]*+").unwrap();
     assert!(class.is_match("xabc"));
     assert!(class.is_match("x"));
+    let ab = Regex::new("ab*+").unwrap();
+    assert!(ab.is_match("a"));
+    assert!(ab.is_match("a b"));
 }
 
 #[test]
 fn test_rejects_double_possessive() {
-    let err = err_of("a*++");
+    for pattern in ["a*++", "a+++", "a?++"] {
+        let err = err_of(pattern);
+        assert!(
+            matches!(err, RegexError::InvalidPattern(_)),
+            "[{pattern}] must be InvalidPattern, got {err}"
+        );
+    }
+}
+
+#[test]
+fn test_nested_star_is_compile_error() {
+    // `a**` nests, like `(a*)*` and `star().star()`, and the lowered
+    // grammar is not LALR(1). A second possessive and a quantifier after a
+    // bound stay syntax errors (see `test_rejects_bad_bounds`).
+    let err = err_of("a**");
+    assert!(
+        matches!(err, RegexError::CompileError(_)),
+        "a** must be a CompileError, got {err}"
+    );
+    let err = err_of("(a*)*");
+    assert!(
+        matches!(err, RegexError::CompileError(_)),
+        "(a*)* must be a CompileError, got {err}"
+    );
+    let err = err_of("ab**");
+    assert!(
+        matches!(err, RegexError::CompileError(_)),
+        "ab** must be a CompileError, got {err}"
+    );
+    let err = err_of("a*+*");
+    assert!(
+        matches!(err, RegexError::CompileError(_)),
+        "a*+* must be a CompileError, got {err}"
+    );
+    assert!(Regex::new("a*+").is_ok());
+    match Regex::from_pattern(Pattern::lit("a").star().star()) {
+        Ok(_) => panic!("star().star() must be a CompileError"),
+        Err(RegexError::CompileError(_)) => {}
+        Err(err) => panic!("star().star() must be a CompileError, got {err}"),
+    }
+}
+
+#[test]
+fn test_rejects_bare_closing_bracket() {
+    for pattern in ["]", "a]", "a]b", "(a])", "[a]]"] {
+        let err = err_of(pattern);
+        assert!(
+            matches!(err, RegexError::InvalidPattern(_)),
+            "[{pattern}] must be InvalidPattern, got {err}"
+        );
+    }
+}
+
+#[test]
+fn test_quoted_literal_metacharacters() {
+    let pipe = Regex::new(r"a\|b").unwrap();
+    assert!(pipe.is_match("a|b"));
+    assert!(pipe.is_match("a|b "));
+    assert!(!pipe.is_match("ab"));
+    assert!(!pipe.is_match("a"));
+    assert!(!pipe.is_match("a | b"));
+    assert_eq!(pipe.find("xa|by"), Some(Match::new(1, 4)));
+    let lone = Regex::new(r"\|").unwrap();
+    assert!(lone.is_match("|"));
+    assert_eq!(lone.find("x|y"), Some(Match::new(1, 2)));
+    // A quote and a semicolon are ordinary characters in a literal run.
+    assert!(Regex::new("a\"b;c").unwrap().is_match("a\"b;c"));
+
+    let semi = Regex::new("a;b").unwrap();
+    assert!(semi.is_match("a;b"));
+    assert!(!semi.is_match("ab"));
+
+    let quoted = Regex::new("a\"b").unwrap();
+    assert!(quoted.is_match("a\"b"));
+    assert!(!quoted.is_match("ab"));
+
+    let class_quote = Regex::new("[a\"b]").unwrap();
+    assert!(class_quote.is_match("\""));
+    assert!(class_quote.is_match("a"));
+    assert!(class_quote.is_match("b"));
+    assert!(!class_quote.is_match("c"));
+
+    let class_pipe = Regex::new("[a|b]c").unwrap();
+    assert!(class_pipe.is_match("|c"));
+    assert!(class_pipe.is_match("ac"));
+    assert!(class_pipe.is_match("bc"));
+    assert!(!class_pipe.is_match("|"));
+
+    let class_pipe_star = Regex::new("[a|b]*").unwrap();
+    assert!(class_pipe_star.is_match(""));
+    assert!(class_pipe_star.is_match("|"));
+    assert!(class_pipe_star.is_match("a|b"));
+
+    let class_semi = Regex::new("[a;b]").unwrap();
+    assert!(class_semi.is_match(";"));
+    assert!(class_semi.is_match("a"));
+    assert!(class_semi.is_match("b"));
+
+    // A backslash is already a one-character literal.
+    assert!(Regex::new(r"a\\").unwrap().is_match("a\\"));
+    assert!(Regex::new(r"\\").unwrap().is_match("\\"));
+}
+
+#[test]
+fn test_find_does_not_let_longer_literal_hide_shorter() {
+    // Full-input maximal munch tokenizes "ab" as one "ab" terminal, which
+    // hides the "b" alternative. `find` retries every char-boundary slice.
+    let re = Regex::new("(ab)c|b").unwrap();
+    assert!(!re.is_match("ab"));
+    assert_eq!(re.find("ab"), Some(Match::new(1, 2)));
+    assert_eq!(re.find("ab "), Some(Match::new(1, 2)));
+    assert_eq!(re.find("zab"), Some(Match::new(2, 3)));
+    assert_eq!(re.find("b"), Some(Match::new(0, 1)));
+    assert_eq!(re.find("abc"), Some(Match::new(0, 3)));
+    assert!(re.is_match("abc "));
+    // The `(ab)` alternative did not participate.
+    assert_eq!(
+        re.captures("zab"),
+        Some(caps(vec![Some(Match::new(2, 3)), None]))
+    );
+    // Longest literal still wins when the longer alternative matches.
+    let munch = Regex::new("a|ab").unwrap();
+    assert_eq!(munch.find("ab"), Some(Match::new(0, 2)));
+    // A longer multibyte literal does not hide the single-character alternative.
+    let accented = Regex::new("(éé)x|é").unwrap();
+    assert_eq!(accented.find("éé"), Some(Match::new(0, 2)));
+    assert_eq!(accented.find("xé"), Some(Match::new(1, 3)));
+    assert!(accented.is_match("ééx"));
+    assert!(!accented.is_match("éé"));
+}
+
+#[test]
+fn test_overlapping_positive_classes() {
+    let re = Regex::new("[a-z]|[a-c]{2}").unwrap();
+    assert!(re.is_match("b"), "a single letter is the class alternative");
+    assert!(re.is_match("bb"));
+    assert!(re.is_match("d"));
+    assert!(!re.is_match(""));
+    assert!(!re.is_match("ddd"));
+    assert_eq!(re.find("b"), Some(Match::new(0, 1)));
+    // `x` is in `[a-z]`. A digit is not, so `d` is the match there.
+    assert_eq!(re.find("xd"), Some(Match::new(0, 1)));
+    assert_eq!(re.find("1d"), Some(Match::new(1, 2)));
+    assert!(re.is_match("bb "));
+    // `{2}` is two class terminals, so the space between them is skipped.
+    assert!(re.is_match("b b"));
+    assert_eq!(re.find("b b"), Some(Match::new(0, 3)));
+
+    let digits = Regex::new(r"\w|\d{2}").unwrap();
+    assert!(digits.is_match("5"));
+    assert!(digits.is_match("12"));
+    assert!(digits.is_match("a"));
+    assert!(digits.is_match("_"));
+    assert!(digits.is_match("5 5"));
+    assert!(!digits.is_match(""));
+    assert!(!digits.is_match("5a"));
+    // `x` is a word character, so it is the leftmost match.
+    assert_eq!(digits.find("x5"), Some(Match::new(0, 1)));
+    assert_eq!(digits.find("x12"), Some(Match::new(0, 1)));
+    assert_eq!(digits.find("!5"), Some(Match::new(1, 2)));
+    // Two digits beat one word character at the same start.
+    assert_eq!(digits.find("!12"), Some(Match::new(1, 3)));
+
+    // Both classes are a single symbol, so shared letters do not conflict.
+    let shared = Regex::new("[a-z]|[a-c]").unwrap();
+    assert!(shared.is_match("a"));
+    assert!(shared.is_match("c"));
+    assert!(!shared.is_match(""));
+    assert!(!shared.is_match("ab"));
+}
+
+#[test]
+fn test_rejects_inverted_ranges() {
+    for pattern in ["[z-a]", "[a--]", "[9-0]", "[a-cz-a]"] {
+        let err = err_of(pattern);
+        assert!(
+            matches!(err, RegexError::InvalidPattern(_)),
+            "[{pattern}] must be InvalidPattern, got {err}"
+        );
+    }
+    let err = err_of_pattern(Pattern::class("z-a"));
     assert!(
         matches!(err, RegexError::InvalidPattern(_)),
-        "a*++ must be rejected, got {err}"
+        "Pattern::class(\"z-a\") must be InvalidPattern, got {err}"
     );
+    let err = err_of_pattern(Pattern::neg_class("9-0"));
+    assert!(
+        matches!(err, RegexError::InvalidPattern(_)),
+        "Pattern::neg_class(\"9-0\") must be InvalidPattern, got {err}"
+    );
+    // Equal endpoints and a hyphen at either edge are real classes.
+    let equal = Regex::new("[a-a]").unwrap();
+    assert!(equal.is_match("a"));
+    assert!(equal.is_match(" a "));
+    assert!(!equal.is_match("b"));
+    assert!(Regex::new("[--]").unwrap().is_match("-"));
+    let leading = Regex::new("[-a]").unwrap();
+    assert!(leading.is_match("-"));
+    assert!(leading.is_match("a"));
+    assert_eq!(leading.find("x-"), Some(Match::new(1, 2)));
+    assert!(Regex::new("[a-]").unwrap().is_match("-"));
+    assert!(Regex::new("[a-]").unwrap().is_match("a"));
+}
+
+fn err_of_pattern(pattern: Pattern) -> RegexError {
+    match Regex::from_pattern(pattern) {
+        Ok(_) => panic!("pattern compiled but must be rejected"),
+        Err(e) => e,
+    }
+}
+
+#[test]
+fn test_is_match_skips_surrounding_whitespace() {
+    // Anchored match is over the token stream. The lexer skips whitespace,
+    // so surrounding spaces are not extra tokens, and `find` does not
+    // include them in the span.
+    let re = Regex::new("test").unwrap();
+    assert!(re.is_match(" test "));
+    assert!(re.is_match("\ttest\n"));
+    assert_eq!(re.find(" test "), Some(Match::new(1, 5)));
+    assert_eq!(re.find("\ttest\n"), Some(Match::new(1, 5)));
+    assert_eq!(re.find("  test"), Some(Match::new(2, 6)));
+    assert!(!re.is_match("a test b"));
+    // One literal does not skip an internal space; two terminals do.
+    assert!(!Regex::new("ab").unwrap().is_match("a b"));
+    let grouped = Regex::new("a(b)").unwrap();
+    assert!(grouped.is_match("a b"));
+    assert_eq!(grouped.find("a b"), Some(Match::new(0, 3)));
+    assert_eq!(
+        grouped.captures("a b"),
+        Some(caps(vec![Some(Match::new(0, 3)), Some(Match::new(2, 3))]))
+    );
+}
+
+#[test]
+fn test_eof_terminal_is_not_the_end_marker() {
+    let re = Regex::new("x?EOF").unwrap();
+    assert!(re.is_match("EOF"));
+    assert!(re.is_match("xEOF"));
+    assert!(re.is_match("EOF "));
+    assert!(re.is_match(" xEOF"));
+    assert!(re.is_match("x EOF"));
+    assert!(!re.is_match("x"));
+    assert!(!re.is_match(""));
+    assert!(!re.is_match("EOFx"));
+    assert_eq!(re.find(" xEOF"), Some(Match::new(1, 5)));
+    assert!(Regex::new("EOF").unwrap().is_match("EOF"));
+    assert_eq!(
+        Regex::new("EOF").unwrap().find("xEOFy"),
+        Some(Match::new(1, 4))
+    );
+    let either = Regex::new("x|xEOF").unwrap();
+    assert!(either.is_match("x"));
+    assert!(either.is_match("xEOF"));
+    let end = Regex::new("x?END").unwrap();
+    assert!(end.is_match("END"));
+    assert!(end.is_match("xEND"));
 }
 
 #[test]
@@ -980,17 +1324,32 @@ fn test_not_class_and_alias() {
 #[test]
 fn test_not_find() {
     // find on the complement: leftmost slice the pattern rejects, longest
-    // at that start.
+    // at that start. Slices are char-boundary spans, so a prefix of a
+    // longer literal is its own candidate.
     let re = Regex::new("a").unwrap().not();
     assert_eq!(re.find("b"), Some(Match::new(0, 1)));
     assert_eq!(re.find("ba"), Some(Match::new(0, 2)));
     assert_eq!(re.find("aaa"), Some(Match::new(0, 3)));
     assert_eq!(re.find("a"), Some(Match::new(0, 0))); // empty is not in L(a)
     let ab = Regex::new("ab").unwrap().not();
-    // `ab` tokenizes as ONE terminal, so the only slices are the whole
-    // token (in L) and the empty slice (not in L).
-    assert_eq!(ab.find("ab"), Some(Match::new(0, 0)));
+    // "ab" is in L, "a" is not, and "a" is longer than the empty slice.
+    assert_eq!(ab.find("ab"), Some(Match::new(0, 1)));
+    // The trailing space does not cover, and "ab" itself is in the language.
+    assert_eq!(ab.find("ab "), Some(Match::new(0, 1)));
     assert_eq!(ab.find("xab"), Some(Match::new(0, 3)));
+    assert_eq!(
+        Regex::new("a").unwrap().not().find("xa"),
+        Some(Match::new(0, 2))
+    );
+    // A space does not cover, so the complement match is the empty slice.
+    assert_eq!(
+        Regex::new("a").unwrap().not().find(" "),
+        Some(Match::new(0, 0))
+    );
+    assert_eq!(
+        Regex::new("a").unwrap().not().find(" a"),
+        Some(Match::new(0, 0))
+    );
 }
 
 #[test]
@@ -1000,6 +1359,8 @@ fn test_not_find_rejects_nowhere() {
     let re = Regex::new("a*").unwrap().not();
     assert_eq!(re.find("aaa"), None);
     assert_eq!(re.find(""), None);
+    // Spaces do not cover, and every covering slice of `a` is in L(a*).
+    assert_eq!(re.find(" aaa "), None);
     assert!(re.captures("aaa").is_none());
 }
 
@@ -1088,12 +1449,15 @@ fn test_and_differs_by_tokenization() {
     let empty = Regex::new("ab").unwrap().and(Regex::new("a").unwrap());
     assert!(!empty.is_match("ab"));
     assert!(!empty.is_match("aab"));
+    assert_eq!(empty.find("ab"), None);
     assert_eq!(empty.find("aab"), None);
     assert!(empty.captures("aab").is_none());
 
     let same = Regex::new("ab").unwrap().and(Regex::new("ab").unwrap());
     assert!(same.is_match("ab"));
+    assert!(same.is_match(" ab "));
     assert_eq!(same.find("xab"), Some(Match::new(1, 3)));
+    assert_eq!(same.find(" ab "), Some(Match::new(1, 3)));
 
     // a|aa ∩ aa = {aa} — even where one side's longest-munch token
     // straddles the other side's token boundary.
@@ -1101,6 +1465,7 @@ fn test_and_differs_by_tokenization() {
     assert!(aa.is_match("aa"));
     assert!(!aa.is_match("a"));
     assert_eq!(aa.find("xaa"), Some(Match::new(1, 3)));
+    assert_eq!(aa.find("aa "), Some(Match::new(0, 2)));
 }
 
 #[test]
@@ -1110,6 +1475,7 @@ fn test_and_find_leftmost_longest() {
         .unwrap()
         .and(Regex::new("a*").unwrap());
     assert_eq!(re.find("baaax"), Some(Match::new(1, 4)));
+    assert_eq!(re.find(" baaa "), Some(Match::new(2, 5)));
     // An empty match at 0 beats any longer match further right.
     let star = Regex::new("a*").unwrap().and(Regex::new("a*").unwrap());
     assert_eq!(star.find("bbb"), Some(Match::new(0, 0)));

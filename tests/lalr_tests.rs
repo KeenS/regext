@@ -84,7 +84,9 @@ fn test_named_api_compiles_conflict_free_tables() {
     let mut registry = GrammarRegistry::new();
     let _e = expr(r#"E "+" T | T"#).named("E", &mut registry).unwrap();
     let _t = expr(r#"T "*" F | F"#).named("T", &mut registry).unwrap();
-    let _f = expr(r#""(" E ")" | "n""#).named("F", &mut registry).unwrap();
+    let _f = expr(r#""(" E ")" | "n""#)
+        .named("F", &mut registry)
+        .unwrap();
 
     let table: LalrTable<String> = LRCompiler::compile(&registry);
     assert_eq!(table.conflict_count(), 0);
@@ -246,10 +248,27 @@ fn test_conflict_counter_flags_non_lalr_grammar() {
     let parser = parse(NOT_LALR_GRAMMAR);
     assert_eq!(
         parser.conflict_count(),
-        6,
-        "this grammar has exactly 6 (state, symbol) action conflicts; \
-         an independent reference implementation agrees"
+        5,
+        "five (state, symbol) slots conflict; one of them is contested by \
+         three actions, so an overwrite counter reports 6"
     );
+}
+
+#[test]
+fn test_conflict_count_counts_each_slot_once() {
+    // Three productions compete for one end-of-input slot. That is one
+    // conflicting (state, symbol) key, not one count per extra overwrite.
+    let three = parse(r#"S -> "a" | "a" | "a""#);
+    assert_eq!(three.conflict_count(), 1);
+    let four = parse(r#"S -> "a" | "a" | "a" | "a""#);
+    assert_eq!(four.conflict_count(), 1);
+    let two = parse(r#"S -> "a" | "a""#);
+    assert_eq!(two.conflict_count(), 1);
+    let distinct = parse(r#"S -> "a" | "b""#);
+    assert_eq!(distinct.conflict_count(), 0);
+    // A reduce/reduce on A's lookahead "b", and one on B's end-of-input.
+    let slots = parse(r#"S -> A B; A -> "a" | "a"; B -> "b" | "b""#);
+    assert_eq!(slots.conflict_count(), 2);
 }
 
 #[test]

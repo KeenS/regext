@@ -12,8 +12,12 @@ fn main() {
     let mut registry = GrammarRegistry::new();
     let _e = expr(r#"E "+" T | T"#).named("E", &mut registry).unwrap();
     let _t = expr(r#"T "*" F | F"#).named("T", &mut registry).unwrap();
-    let _f = expr(r#""(" E ")" | NUM"#).named("F", &mut registry).unwrap();
-    let _num = expr(r#""1" | "2" | "3""#).named("NUM", &mut registry).unwrap();
+    let _f = expr(r#""(" E ")" | NUM"#)
+        .named("F", &mut registry)
+        .unwrap();
+    let _num = expr(r#""1" | "2" | "3""#)
+        .named("NUM", &mut registry)
+        .unwrap();
 
     let table = LRCompiler::compile::<String>(&registry);
     let mut engine = Engine::new(0);

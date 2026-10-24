@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use RegExt::CfgParser;
 use RegExt::lexer::{Lexer, Token};
+use RegExt::{CfgParser, Match};
 
 fn terminal_set(items: &[&str]) -> HashSet<String> {
     items.iter().map(|s| s.to_string()).collect()
@@ -99,15 +99,29 @@ fn test_tokenizer_unknown_char_emitted_raw() {
     let lexer = Lexer::new(terminal_set(&["a"]));
     let tokens = lexer.tokenize("z");
     assert_eq!(tokens, vec![Token::Terminal("z".to_string()), Token::EOF]);
+
+    // With an OTHER terminal present, an unmatched character uses that name.
+    let lexer = Lexer::new(terminal_set(&["\u{0}other", "a"]));
+    assert_eq!(
+        lexer.tokenize("az"),
+        vec![
+            Token::Terminal("a".to_string()),
+            Token::Terminal("\u{0}other".to_string()),
+            Token::EOF,
+        ]
+    );
 }
 
 #[test]
 fn test_parser_with_char_class() {
     let parser = CfgParser::new(r#"S -> "[1-5]""#).unwrap();
     assert!(parser.is_match("3"));
+    assert!(parser.is_match(" 3 "));
     assert!(!parser.is_match("-"));
     assert!(!parser.is_match("0"));
     assert!(!parser.is_match("33"));
+    assert!(!parser.is_match("3 4"));
+    assert_eq!(parser.find("x3y"), Some(Match::new(1, 2)));
 }
 
 #[test]
@@ -116,7 +130,11 @@ fn test_parser_literal_preferred_over_char_class() {
     assert!(parser.is_match("ab"));
     assert!(parser.is_match("a"));
     assert!(parser.is_match("b"));
+    assert!(parser.is_match("c"));
     assert!(!parser.is_match("d"));
+    assert!(!parser.is_match("abc"));
+    assert_eq!(parser.find("xab"), Some(Match::new(1, 3)));
+    assert_eq!(parser.find("xc"), Some(Match::new(1, 2)));
 }
 
 #[test]
@@ -159,6 +177,58 @@ fn test_tokenizer_quoted_string_escapes() {
     let lexer = Lexer::new(terminal_set(&["any"]));
     let tokens = lexer.tokenize(r#""a \"quoted\" word""#);
     assert_eq!(tokens, vec![Token::Terminal("any".to_string()), Token::EOF]);
+}
+
+#[test]
+fn test_tokenizer_longest_match_across_kinds() {
+    let lexer = Lexer::new(terminal_set(&["hello!", "[a-z]+"]));
+    assert_eq!(
+        lexer.tokenize("hello!"),
+        vec![Token::Terminal("hello!".to_string()), Token::EOF]
+    );
+    assert_eq!(
+        lexer.tokenize("hello"),
+        vec![Token::Terminal("[a-z]+".to_string()), Token::EOF]
+    );
+
+    let lexer = Lexer::new(terminal_set(&["[a-z]+", "[a-c]+"]));
+    assert_eq!(
+        lexer.tokenize("abcd"),
+        vec![Token::Terminal("[a-z]+".to_string()), Token::EOF,]
+    );
+    assert_eq!(
+        lexer.tokenize("abc"),
+        vec![Token::Terminal("[a-c]+".to_string()), Token::EOF]
+    );
+
+    // Equal length: a literal outranks a class run. A longer run still wins.
+    let lexer = Lexer::new(terminal_set(&["ab", "[a-z]+"]));
+    assert_eq!(
+        lexer.tokenize("ab"),
+        vec![Token::Terminal("ab".to_string()), Token::EOF]
+    );
+    assert_eq!(
+        lexer.tokenize("abc"),
+        vec![Token::Terminal("[a-z]+".to_string()), Token::EOF]
+    );
+}
+
+#[test]
+fn test_tokenizer_empty_literal_does_not_stick() {
+    let lexer = Lexer::new(terminal_set(&["", "a"]));
+    assert_eq!(lexer.tokenize(""), vec![Token::EOF]);
+    assert_eq!(
+        lexer.tokenize("a"),
+        vec![Token::Terminal("a".to_string()), Token::EOF]
+    );
+    assert_eq!(
+        lexer.tokenize("aa"),
+        vec![
+            Token::Terminal("a".to_string()),
+            Token::Terminal("a".to_string()),
+            Token::EOF,
+        ]
+    );
 }
 
 #[test]

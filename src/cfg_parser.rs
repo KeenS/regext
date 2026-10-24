@@ -6,7 +6,10 @@
 //! - the **first left-hand side is the start symbol**;
 //! - a **quoted** right-hand-side symbol is a terminal, an **unquoted** one is
 //!   a nonterminal;
-//! - `|` is alternation (separate productions), `epsilon` is the empty symbol.
+//! - `|` is alternation (separate productions), `epsilon` is the empty symbol;
+//! - `;`, `|`, whitespace, and `->` are recognized only outside quotes.
+//!   Inside a terminal, `\\` and `\"` are escapes. An empty terminal and an
+//!   unclosed quote are errors.
 //!
 //! ```
 //! use RegExt::{Captures, CfgParser, Match};
@@ -22,12 +25,15 @@
 //!
 //! Terminals may be plain literals, character classes (`"[a-z]"`),
 //! maximal-munch class runs (`"[a-z]+"`), or `"any"` (a whole double-quoted
-//! string) — see [`crate::lexer`].
+//! string). Positive and negated classes are expanded into character
+//! terminals before the LALR table is built; class-runs stay lexer
+//! terminals. The lexer takes the longest match across every terminal kind.
+//! See [`crate::lexer`].
 
 use std::collections::HashSet;
 
 use crate::engine::{Engine, Reduction};
-use crate::grammar::{GrammarRegistry, Symbol};
+use crate::grammar::{self, GrammarRegistry, Symbol};
 use crate::lalr::{LRCompiler, LalrTable};
 use crate::lexer::{Lexer, Token, TokenSpan};
 
@@ -100,52 +106,18 @@ impl CfgParser {
     /// with [`CfgError`] on a production without `->` or an empty grammar.
     pub fn new(grammar: &str) -> Result<Self, CfgError> {
         let mut registry = GrammarRegistry::new();
-        let mut start_symbol = None;
-
-        for prod_str in grammar.split(';') {
-            let prod_str = prod_str.trim();
-            if prod_str.is_empty() {
-                continue;
-            }
-
-            if let Some(idx) = prod_str.find("->") {
-                let lhs = prod_str[..idx].trim();
-                let rhs = prod_str[idx + 2..].trim();
-
-                if start_symbol.is_none() {
-                    start_symbol = Some(lhs.to_string());
-                }
-
-                let expr = GrammarRegistry::expr(rhs);
-                registry.register(lhs, expr)?;
-            } else {
-                return Err(CfgError {
-                    message: format!("Invalid production: {}", prod_str),
-                });
-            }
+        let productions = grammar::split_grammar(grammar)?;
+        if productions.is_empty() {
+            return Err(CfgError {
+                message: "No start symbol".to_string(),
+            });
         }
-
-        let start_sym = start_symbol.ok_or_else(|| CfgError {
-            message: "No start symbol".to_string(),
-        })?;
-        // Terminals are the terminal symbols that actually occur in productions,
-        // so choice/sequence syntax like `abc|def` yields `abc` and `def`.
-        let terminals: HashSet<String> = registry
-            .productions
-            .iter()
-            .flat_map(|(_, rhs)| rhs.iter())
-            .filter_map(|sym| match sym {
-                Symbol::Terminal(t) => Some(t.clone()),
-                Symbol::NonTerminal(_) => None,
-            })
-            .collect();
-        let table = LRCompiler::compile::<String>(&registry);
-
-        Ok(Self {
-            table,
-            start_symbol: start_sym,
-            terminals,
-        })
+        let start_sym = productions[0].0.clone();
+        for (lhs, rhs) in productions {
+            let expr = grammar::parse_rhs(&rhs)?;
+            registry.register(&lhs, expr)?;
+        }
+        Self::finish(registry, start_sym)
     }
 
     /// Compile a [`GrammarRegistry`] (built composable-style with
@@ -156,25 +128,31 @@ impl CfgParser {
         let start_symbol = registry.start_symbol.clone().ok_or_else(|| CfgError {
             message: "No start symbol".to_string(),
         })?;
-        let terminals: HashSet<String> = registry
-            .productions
-            .iter()
-            .flat_map(|(_, rhs)| rhs.iter())
-            .filter_map(|sym| match sym {
-                Symbol::Terminal(t) => Some(t.clone()),
-                Symbol::NonTerminal(_) => None,
-            })
-            .collect();
+        let start_sym = match start_symbol {
+            Symbol::NonTerminal(name) | Symbol::Terminal(name) => name,
+            Symbol::End => {
+                return Err(CfgError {
+                    message: "No start symbol".to_string(),
+                });
+            }
+        };
+        Self::finish(registry, start_sym)
+    }
+
+    fn finish(mut registry: GrammarRegistry, start_symbol: String) -> Result<Self, CfgError> {
+        let (productions, terminals) =
+            grammar::expand_classes(std::mem::take(&mut registry.productions))?;
+        registry.productions = productions;
         let table = LRCompiler::compile::<String>(&registry);
         Ok(Self {
             table,
-            start_symbol: start_symbol.into(),
+            start_symbol,
             terminals,
         })
     }
 
-    /// Anchored match: `true` when the ENTIRE input (all of its tokens)
-    /// derives the start symbol.
+    /// Anchored match: `true` when every token of `text` derives the start
+    /// symbol. The lexer skips whitespace, so surrounding spaces still match.
     pub fn is_match(&self, text: &str) -> bool {
         let spans = self.token_spans(text);
         let n = spans.len().saturating_sub(1);
@@ -302,13 +280,47 @@ impl CfgParser {
 
     /// Find the leftmost match of this grammar anywhere in `text`.
     ///
-    /// The match begins at the earliest position from which the grammar
-    /// can derive a prefix of the remaining input, and extends as far as
-    /// the grammar allows at that position (leftmost start, longest
-    /// match). Returns the byte span of the match.
+    /// The match begins at the earliest char boundary from which the
+    /// grammar can derive a slice, and extends as far as the grammar allows
+    /// at that position (leftmost start, longest match). A non-empty slice
+    /// is a candidate only when its tokens cover it exactly, so whitespace
+    /// the lexer skipped is not part of the span. Returns byte offsets.
     pub fn find(&self, text: &str) -> Option<Match> {
-        let (start, end) = self.find_tokens_with(text, |_, _| true)?;
-        Some(self.match_bytes(text, start, end))
+        let (start, end) = self.find_bytes(text)?;
+        Some(Match::new(start, end))
+    }
+
+    /// Leftmost char-boundary slice whose tokens cover it and that derives
+    /// the start symbol. Longest end at that start wins.
+    fn find_bytes(&self, text: &str) -> Option<(usize, usize)> {
+        let mut bounds: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+        bounds.push(text.len());
+        for (start_i, &start) in bounds.iter().enumerate() {
+            for &end in bounds[start_i..].iter().rev() {
+                let slice = &text[start..end];
+                if start != end && !self.covers_text(slice) {
+                    continue;
+                }
+                if self.accepts_text(slice) {
+                    return Some((start, end));
+                }
+            }
+        }
+        None
+    }
+
+    /// `true` when the non-empty `text` tokenizes with the first token at
+    /// byte 0 and the last token ending at `text.len()`.
+    pub(crate) fn covers_text(&self, text: &str) -> bool {
+        let spans = self.token_spans(text);
+        let count = spans.len().saturating_sub(1);
+        count > 0 && spans[0].start == 0 && spans[count - 1].end == text.len()
+    }
+
+    fn accepts_text(&self, text: &str) -> bool {
+        let spans = self.token_spans(text);
+        let count = spans.len().saturating_sub(1);
+        self.derives(&spans, 0, count)
     }
 
     /// Find the leftmost match (see [`CfgParser::find`]) and report the
@@ -318,18 +330,23 @@ impl CfgParser {
     /// that nonterminal in the winning derivation; groups that did not
     /// participate are reported as `None`.
     pub fn captures(&self, text: &str, groups: &[&str]) -> Option<Captures> {
-        let (start, end) = self.find_tokens_with(text, |_, _| true)?;
-        let reductions = self.slice_reductions(text, start, end)?;
-        let whole = self.match_bytes(text, start, end);
+        let (start, end) = self.find_bytes(text)?;
+        let slice = &text[start..end];
+        let reductions = self.slice_reductions(slice, 0, self.token_count(slice))?;
+        let whole = Match::new(start, end);
         let mut matches = vec![Some(whole)];
         for name in groups {
-            let span = reductions
-                .iter()
-                .rfind(|r| &r.lhs == name)
-                .map(|r| self.reduction_bytes(text, start, r));
+            let span = reductions.iter().rfind(|r| &r.lhs == name).map(|r| {
+                let inner = self.reduction_bytes(slice, 0, r);
+                Match::new(start + inner.start, start + inner.end)
+            });
             matches.push(span);
         }
         Some(Captures { matches })
+    }
+
+    fn token_count(&self, text: &str) -> usize {
+        self.token_spans(text).len().saturating_sub(1)
     }
 
     /// The byte span of the token slice `[start, end)`.

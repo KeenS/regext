@@ -56,6 +56,7 @@
 //! - `\s` — whitespace is the token separator (the lexer skips it), so no
 //!   terminal can match it;
 //! - empty alternatives (`a|`), unbalanced parentheses, dangling escapes,
+//!   a `]` outside a class, an inverted class range (`[z-a]`),
 //!   quantifiers with no operand, malformed repetition bounds (`{}`, `{,3}`,
 //!   `a{3,2}`, bound above 100, a quantifier after a bound such as `a{2}+`);
 //! - patterns whose lowering is not conflict-free LALR(1), such as `(a)+a`
@@ -66,9 +67,11 @@
 //!
 //! ## Matching semantics
 //!
-//! - [`Regex::is_match`] / [`CfgParser::is_match`] — anchored, whole input.
+//! - [`Regex::is_match`] / [`CfgParser::is_match`] — anchored on the token
+//!   stream. The lexer skips whitespace, so `" test "` matches `test`.
 //! - [`Regex::find`] / [`CfgParser::find`] — leftmost start, longest at that
-//!   start; byte offsets into the input.
+//!   start; byte offsets into the input. Skipped whitespace is not part of
+//!   the span (`find(" test ")` is `(1, 5)`).
 //! - [`Regex::captures`] / [`CfgParser::captures`] — the leftmost match plus
 //!   each group's span. A capture is the input range covered by the group's
 //!   *last reduction* in the winning derivation: `(a)+` captures the last
@@ -157,7 +160,8 @@
 //! [`CfgParser`] accepts grammars in a small string format — productions are
 //! `;`-separated, the **first LHS is the start symbol**, quoted symbols are
 //! terminals and unquoted symbols nonterminals, `|` is alternation and
-//! `epsilon` is empty:
+//! `epsilon` is empty. `;`, `|`, whitespace, and `->` split only outside
+//! quotes; `\"` and `\\` escape inside a terminal, and `""` is rejected:
 //!
 //! ```
 //! use RegExt::CfgParser;
@@ -168,7 +172,9 @@
 //! ```
 //!
 //! Terminals may also be character classes (`"[a-z]"`), maximal-munch class
-//! runs (`"[a-z]+"`), or `"any"` (a whole double-quoted string). See
+//! runs (`"[a-z]+"`), or `"any"` (a whole double-quoted string). Positive and
+//! negated classes expand to character terminals before the table is built;
+//! the lexer then takes the longest match across every terminal kind. See
 //! [`Lexer`] for the tokenization rules.
 //!
 //! ## Modules

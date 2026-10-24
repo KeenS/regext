@@ -179,10 +179,24 @@ members are single characters or `a-z` ranges:
 | `[a\|b]`   | one of `a`, `\|`, `b` — special chars are members inside a class |
 
 Quantifiers bind to the whole class naturally, because a class is one atom:
-`[a-z]*`, `[^abc]+`, `[0-9]{3}` all work without special-casing. Lowering is
-straight to the lexer's terminal forms — `[a-z]` lowers to the single quoted
-terminal `"[a-z]"` (and `[^a-z]` to `"[^a-z]"`), so matching is a property of
-the maximal-munch lexer, not of the pattern layer.
+`[a-z]*`, `[^abc]+`, `[0-9]{3}` all work without special-casing. The regex
+lowerer emits one quoted terminal (`"[a-z]"`, `"[^a-z]"`). Before the LALR
+table is built, a positive class is expanded into one production per member
+character, shared with every other class that names that character, so
+`[a-z]|[a-c]{2}` matches both `b` and `bb`. A class that also appears inside
+a longer right-hand side becomes one nonterminal of those characters. A
+negated class expands to the characters it does not exclude, plus one
+fallback token for everything else. A class-run such as `[a-z]+` stays a
+single lexer terminal.
+
+The lexer then takes the longest match across every terminal kind. On a tie
+a quoted string wins over a literal, then a class-run, then a positive
+class, then a negated class. The literal `hello!` therefore beats the
+shorter run `[a-z]+`.
+
+A range whose start sorts after its end (`[z-a]`, `[9-0]`, `[a--]`) is
+rejected. `[a-a]` is the single character `a`. A hyphen at either edge
+(`[-a]`, `[a-]`) and `[--]` are literal hyphens, not ranges.
 
 A class of exactly one multibyte character is char-exact: `[é]` matches
 exactly `é` (and `[^é]` everything else).
@@ -312,11 +326,14 @@ an assertion body that is not conflict-free LALR(1) is a `CompileError`
 
 ### `is_match` is anchored
 
-`is_match(text)` requires the **entire** input to match. This differs from the
-`regex` crate, where `is_match` performs a substring search. In RegExt:
+`is_match(text)` requires every token of the input to derive the start
+symbol. The lexer skips whitespace, so that is the token stream rather than
+the raw characters. This differs from the `regex` crate, where `is_match`
+performs a substring search. In RegExt:
 
-- `Regex::new("test").is_match("a test b")` → `false`
 - `Regex::new("test").is_match("test")`     → `true`
+- `Regex::new("test").is_match(" test ")`   → `true` (the spaces are skipped)
+- `Regex::new("test").is_match("a test b")` → `false`
 
 If you want to search anywhere in the text, use `find` or `captures`.
 
@@ -324,7 +341,10 @@ If you want to search anywhere in the text, use `find` or `captures`.
 
 `find(text)` returns the **leftmost** match (earliest start position wins), and
 at that start it extends **as far as the grammar allows** (longest at that
-position). It returns byte offsets, half-open `[start, end)`.
+position). It returns byte offsets, half-open `[start, end)`. A non-empty
+candidate must be covered by its tokens exactly, so whitespace the lexer
+skipped is not part of the span: `Regex::new("test").find(" test ")` is
+`(1, 5)`.
 
 - `a+` on `baab`  → `(1, 3)` — leftmost of the two candidate matches.
 - `a+` on `aaab`  → `(0, 3)` — longest at the leftmost start.
@@ -604,6 +624,8 @@ compile time**, not approximated:
 | `h.llo`, `.`, `a.*b`      | `InvalidPattern`       | `.` (any-character) is not a finite, enumerable set of CFG terminals |
 | `\s`, `a\sb`              | `InvalidPattern`       | whitespace is the token separator (the lexer skips it), so no terminal can match it |
 | `[]`, `[a[b]`, `[a`       | `InvalidPattern`       | empty class, nested `[`, or unclosed class |
+| `]`, `a]`, `a]b`          | `InvalidPattern`       | a `]` outside a class                       |
+| `[z-a]`, `[a--]`, `[9-0]` | `InvalidPattern`       | inverted character range                    |
 | `a\|`, `\|b`, `\|`        | `InvalidPattern`       | empty alternative                                   |
 | `(a`, `(a)(b`, `a(b`      | `InvalidPattern`       | unbalanced parentheses                              |
 | `a)`                      | `InvalidPattern`       | trailing junk                                       |
@@ -653,7 +675,11 @@ accepts a grammar in a small string format. This is where RegExt shows it is a
 
 ### Grammar syntax
 
-- Productions are separated by `;` (a trailing `;` is fine).
+- Productions are separated by `;` (a trailing `;` is fine). `;`, `|`,
+  whitespace, and `->` are recognized only outside quotes, so `"a;b"` and
+  `"a|b"` are single terminals.
+- Inside a quoted terminal, `\\` and `\"` are escapes. An empty terminal
+  `""` is rejected, and an unclosed quote is an error.
 - Each production is `LHS -> RHS`. **The first LHS is the start symbol.**
 - RHS symbols are whitespace-separated. A **quoted** symbol is a terminal; an
   **unquoted** symbol is a nonterminal.
@@ -669,7 +695,12 @@ assert!(!parser.is_match("xab"));
 
 ### Terminal forms
 
-The lexer recognizes these terminal shapes in the input text:
+You write these terminal shapes. A `[class]+` run and `"any"` are matched by
+the lexer directly. A positive or negated class is rewritten into
+single-character terminals before the lexer runs (a negated class also gets
+one fallback token for every other character). The lexer then chooses the
+longest match across every remaining terminal; on a tie a literal beats a
+class-run.
 
 | Terminal     | Matches                                                     |
 |--------------|-------------------------------------------------------------|
@@ -679,8 +710,8 @@ The lexer recognizes these terminal shapes in the input text:
 | `"[a-z]+"`   | a **maximal-munch run**: the longest stretch of class chars |
 | `"any"`      | any double-quoted string token (a whole `"…"` as one unit)  |
 
-Character classes support ranges (`a-z`) and single members. Whitespace in the
-input is skipped between tokens.
+Character classes support ranges (`a-z`) and single members. An inverted
+range is an error. Whitespace in the input is skipped between tokens.
 
 ```rust
 // A "word then number" token — impossible to express as a plain literal regex.
@@ -699,8 +730,8 @@ production order. `Regex::new` uses this to refuse non-LALR(1) patterns.
 ### `CfgParser` API
 
 - `CfgParser::new(grammar: &str) -> Result<CfgParser, CfgError>`
-- `is_match(text) -> bool` — anchored, whole-input
-- `find(text) -> Option<Match>` — leftmost, longest
+- `is_match(text) -> bool` — anchored on the token stream (whitespace is skipped)
+- `find(text) -> Option<Match>` — leftmost, longest; skipped whitespace is not part of the span
 - `captures(text, groups: &[&str]) -> Option<Captures>` — spans of the named nonterminals, in the order given
 - `conflict_count() -> usize`
 - `token_spans(text) -> Vec<TokenSpan>` — tokenization with byte spans; the substrate every match is built on
@@ -765,8 +796,8 @@ which are all LALR(1)-friendly. Verified lowered forms:
 | `a\|ab`    | `S -> N1; N1 -> "a" \| "ab"`                                |
 | `ab?`      | `S -> "a" N1; N1 -> epsilon; N1 -> "b"`                     |
 | `x(y*)(z)` | `S -> "x" G1 G2; N1 -> "y" N1; N1 -> epsilon; G1 -> N1; G2 -> "z"` |
-| `[a-z]`    | `S -> "[a-z]"` — a class is a single quoted terminal        |
-| `[^a-z]`   | `S -> "[^a-z]"` — a negated class is a single quoted terminal |
+| `[a-z]`    | emitted as `S -> "[a-z]"`, then one production per letter   |
+| `[^a-z]`   | emitted as `S -> "[^a-z]"`, then the other characters plus a fallback token |
 | `a{2}`     | `S -> "a" "a"` — an exact bound unrolls to copies           |
 | `a{2,}`    | `S -> "a" "a" N1; N1 -> "a" N1; N1 -> epsilon` — copies plus `a*` |
 | `a{2,3}`   | `S -> N1; N1 -> "a" "a"; N1 -> "a" "a" "a"` — one nonterminal, one production per copy count |
@@ -812,8 +843,8 @@ pub use regex::{AssertKind, Pattern, Regex, RegexError};
 - `pattern() -> &str` — the original pattern.
 - `not() -> Regex` — the complement language (`is_match` negated; see [Complement](#complement-not)).
 - `group_count() -> usize` — number of capture groups (including groups inside assertion bodies).
-- `is_match(text) -> bool` — anchored, whole-input match.
-- `find(text) -> Option<Match>` — leftmost, longest match.
+- `is_match(text) -> bool` — anchored on the token stream (whitespace is skipped).
+- `find(text) -> Option<Match>` — leftmost, longest match; skipped whitespace is not part of the span.
 - `captures(text) -> Option<Captures>` — whole match + each group's span.
 
 `RegexError { InvalidPattern(String), CompileError(String) }`.
