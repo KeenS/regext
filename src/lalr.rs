@@ -89,12 +89,19 @@ fn augmented_start(prods: &[(Symbol, Vec<Symbol>)], start: &Symbol) -> Symbol {
     }
 }
 
+/// Actions and gotos of one LALR state. Terminals are keyed by the symbol
+/// itself so a lookup borrows the lookahead instead of cloning it.
+struct StateRow<S> {
+    /// Action on end-of-input. [`Action::Error`] when the state has none.
+    eof: Action,
+    terminals: HashMap<S, Action>,
+    goto: HashMap<S, usize>,
+}
+
 /// A compiled LALR(1) table over symbol type `S`; implements
 /// [`crate::engine::Table`].
 pub struct LalrTable<S> {
-    /// `(state, lookahead)` actions; `None` lookahead is end-of-input.
-    action: HashMap<(usize, Option<S>), Action>,
-    goto: HashMap<(usize, S), usize>,
+    rows: Vec<StateRow<S>>,
     productions: Vec<Production<S>>,
     /// Number of (state, symbol) table slots where two different actions
     /// collided and were resolved last-write-wins. Zero for conflict-free
@@ -112,15 +119,43 @@ impl<S: Clone + PartialEq + Eq + Hash + Debug> LalrTable<S> {
     }
 }
 
+impl<S: Clone + PartialEq + Eq + Hash + Debug> LalrTable<S> {
+    pub(crate) fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(crate) fn eof_action(&self, state: usize) -> Action {
+        self.rows[state].eof
+    }
+
+    pub(crate) fn terminal_actions(&self, state: usize) -> &HashMap<S, Action> {
+        &self.rows[state].terminals
+    }
+
+    pub(crate) fn gotos(&self, state: usize) -> &HashMap<S, usize> {
+        &self.rows[state].goto
+    }
+
+    pub(crate) fn productions(&self) -> &[Production<S>] {
+        &self.productions
+    }
+}
+
 impl<S: Clone + PartialEq + Eq + Hash + Debug> Table<S> for LalrTable<S> {
     fn action(&self, state: usize, symbol: Option<&S>) -> Action {
-        self.action
-            .get(&(state, symbol.cloned()))
-            .cloned()
-            .unwrap_or(Action::Error)
+        let Some(row) = self.rows.get(state) else {
+            return Action::Error;
+        };
+        match symbol {
+            None => row.eof,
+            Some(sym) => row.terminals.get(sym).copied().unwrap_or(Action::Error),
+        }
     }
     fn goto(&self, state: usize, symbol: &S) -> usize {
-        *self.goto.get(&(state, symbol.clone())).unwrap_or(&0)
+        self.rows
+            .get(state)
+            .and_then(|row| row.goto.get(symbol).copied())
+            .unwrap_or(0)
     }
     fn production(&self, id: usize) -> &Production<S> {
         &self.productions[id]
@@ -385,9 +420,29 @@ impl LRCompiler {
             }
         }
 
+        let n_states = lalr_states.len();
+        let mut rows = Vec::with_capacity(n_states);
+        for _ in 0..n_states {
+            rows.push(StateRow {
+                eof: Action::Error,
+                terminals: HashMap::new(),
+                goto: HashMap::new(),
+            });
+        }
+        for ((state, symbol), action) in action_table {
+            match symbol {
+                None => rows[state].eof = action,
+                Some(symbol) => {
+                    rows[state].terminals.insert(symbol, action);
+                }
+            }
+        }
+        for ((state, symbol), next) in goto_table {
+            rows[state].goto.insert(symbol, next);
+        }
+
         LalrTable {
-            action: action_table,
-            goto: goto_table,
+            rows,
             productions: productions_vec,
             conflicts: conflicted.len(),
         }

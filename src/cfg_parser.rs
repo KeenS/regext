@@ -30,12 +30,11 @@
 //! terminals. The lexer takes the longest match across every terminal kind.
 //! See [`crate::lexer`].
 
-use std::collections::HashSet;
-
-use crate::engine::{Engine, Reduction};
+use crate::engine::Reduction;
+use crate::exec::Exec;
 use crate::grammar::{self, GrammarRegistry, Symbol};
-use crate::lalr::{LRCompiler, LalrTable};
-use crate::lexer::{Lexer, Token, TokenSpan};
+use crate::lalr::LRCompiler;
+use crate::lexer::{self, Lexer, Token, TokenSpan};
 
 /// Error returned by [`CfgParser::new`]: the grammar string was malformed
 /// (a production without `->`, or no productions at all).
@@ -88,14 +87,15 @@ pub struct Captures {
     pub matches: Vec<Option<Match>>,
 }
 
-/// A compiled context-free grammar: terminals (for the [`Lexer`]), a start
-/// symbol, and an LALR(1) action/goto table driving the [`Engine`].
+/// A compiled context-free grammar: a cached [`Lexer`] and an LALR(1)
+/// interpreter over interned symbol ids.
 ///
 /// See the module docs for the grammar string format.
 pub struct CfgParser {
-    table: LalrTable<String>,
-    start_symbol: String,
-    terminals: HashSet<String>,
+    lexer: Lexer,
+    exec: Exec,
+    /// Distinct `(state, symbol)` slots whose actions collided at compile time.
+    conflicts: usize,
 }
 
 impl CfgParser {
@@ -143,28 +143,32 @@ impl CfgParser {
         let (productions, terminals) =
             grammar::expand_classes(std::mem::take(&mut registry.productions))?;
         registry.productions = productions;
+        let first_chars = crate::exec::first_chars(&registry.productions, &start_symbol);
         let table = LRCompiler::compile::<String>(&registry);
+        let conflicts = table.conflict_count();
+        let exec = Exec::from_table(&table, &start_symbol, first_chars);
+        let lexer = Lexer::new(terminals);
         Ok(Self {
-            table,
-            start_symbol,
-            terminals,
+            lexer,
+            exec,
+            conflicts,
         })
     }
 
     /// Anchored match: `true` when every token of `text` derives the start
     /// symbol. The lexer skips whitespace, so surrounding spaces still match.
     pub fn is_match(&self, text: &str) -> bool {
-        let spans = self.token_spans(text);
-        let n = spans.len().saturating_sub(1);
-        self.derives(&spans, 0, n)
+        self.exec.accepts_text(&self.lexer, text)
     }
 
-    /// `true` when the token slice `spans[start..end]` derives the start
-    /// symbol (an empty slice when `start == end`).
-    fn derives(&self, spans: &[TokenSpan], start: usize, end: usize) -> bool {
-        let symbols = Self::slice_symbols(spans, start, end);
-        let mut engine = Engine::new(0);
-        matches!(engine.run(&self.table, symbols), Ok(sym) if sym == self.start_symbol)
+    fn ids_of(&self, spans: &[TokenSpan]) -> Vec<u32> {
+        spans
+            .iter()
+            .map(|span| match &span.token {
+                Token::Terminal(name) => self.exec.id_of_name(name),
+                Token::EOF => unreachable!("EOF token is excluded from slices"),
+            })
+            .collect()
     }
 
     /// Number of (state, symbol) action slots where two different LALR(1)
@@ -173,25 +177,13 @@ impl CfgParser {
     /// not LALR(1) and behavior on the colliding inputs depends on the
     /// order of the productions.
     pub fn conflict_count(&self) -> usize {
-        self.table.conflict_count()
+        self.conflicts
     }
 
     /// Tokenize `text` with the grammar's terminal set, recording the byte
     /// span of every token (a trailing EOF span is included).
     pub fn token_spans(&self, text: &str) -> Vec<TokenSpan> {
-        Lexer::new(self.terminals.clone()).tokenize_with_spans(text)
-    }
-
-    /// Symbols of the token slice `spans[start..end]` (EOF excluded by
-    /// the caller passing `end <= spans.len() - 1`).
-    fn slice_symbols(spans: &[TokenSpan], start: usize, end: usize) -> Vec<String> {
-        spans[start..end]
-            .iter()
-            .map(|t| match &t.token {
-                Token::Terminal(s) => s.clone(),
-                Token::EOF => unreachable!("EOF token is excluded from slices"),
-            })
-            .collect()
+        self.lexer.tokenize_with_spans(text)
     }
 
     /// Byte span of the token range `spans[start..end]`; an empty range is
@@ -214,10 +206,11 @@ impl CfgParser {
     {
         let spans = self.token_spans(text);
         let n = spans.len().saturating_sub(1);
+        let ids = self.ids_of(&spans[..n]);
         for start in 0..=n {
             let mut ends = Vec::new();
             for end in start..=n {
-                if self.derives(&spans, start, end) {
+                if self.exec.accepts_ids(&ids[start..end]) {
                     ends.push(end);
                 }
             }
@@ -239,12 +232,8 @@ impl CfgParser {
         end: usize,
     ) -> Option<Vec<Reduction<String>>> {
         let spans = self.token_spans(text);
-        let symbols = Self::slice_symbols(&spans, start, end);
-        let mut engine = Engine::new(0);
-        match engine.run_traced(&self.table, symbols) {
-            Ok((sym, reductions)) if sym == self.start_symbol => Some(reductions),
-            _ => None,
-        }
+        let ids = self.ids_of(&spans[start..end]);
+        self.exec.trace_ids(&ids)
     }
 
     /// The longest prefix of `text` that derives the start symbol; `None`
@@ -253,14 +242,10 @@ impl CfgParser {
     pub fn prefix_match(&self, text: &str) -> Option<Match> {
         let spans = self.token_spans(text);
         let n = spans.len().saturating_sub(1);
-        let mut best = None;
-        for end in 0..=n {
-            if self.derives(&spans, 0, end) {
-                best = Some(end);
-            }
-        }
-        let end = best?;
-        Some(self.match_bytes(text, 0, end))
+        let ids = self.ids_of(&spans[..n]);
+        let end = self.exec.longest_prefix(&ids)?;
+        let (start, stop) = Self::slice_bytes(&spans, 0, end);
+        Some(Match::new(start, stop))
     }
 
     /// The longest suffix of `text` that derives the start symbol — the match
@@ -270,9 +255,11 @@ impl CfgParser {
     pub fn suffix_match(&self, text: &str) -> Option<Match> {
         let spans = self.token_spans(text);
         let n = spans.len().saturating_sub(1);
+        let ids = self.ids_of(&spans[..n]);
         for start in 0..=n {
-            if self.derives(&spans, start, n) {
-                return Some(self.match_bytes(text, start, n));
+            if self.exec.accepts_ids(&ids[start..]) {
+                let (byte_start, byte_end) = Self::slice_bytes(&spans, start, n);
+                return Some(Match::new(byte_start, byte_end));
             }
         }
         None
@@ -292,35 +279,43 @@ impl CfgParser {
 
     /// Leftmost char-boundary slice whose tokens cover it and that derives
     /// the start symbol. Longest end at that start wins.
-    fn find_bytes(&self, text: &str) -> Option<(usize, usize)> {
-        let mut bounds: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
-        bounds.push(text.len());
-        for (start_i, &start) in bounds.iter().enumerate() {
-            for &end in bounds[start_i..].iter().rev() {
-                let slice = &text[start..end];
-                if start != end && !self.covers_text(slice) {
-                    continue;
-                }
-                if self.accepts_text(slice) {
-                    return Some((start, end));
+    ///
+    /// A nullable grammar matches the empty slice at byte 0, so no later
+    /// start is examined. Every other start whose first character cannot
+    /// begin a FIRST terminal is skipped without tokenizing.
+    pub(crate) fn find_bytes(&self, text: &str) -> Option<(usize, usize)> {
+        if self.exec.nullable() {
+            return self
+                .exec
+                .longest_match(&self.lexer, text, 0)
+                .map(|end| (0, end));
+        }
+        let mut start = 0;
+        while start < text.len() {
+            if self.exec.may_start(text, start) {
+                if let Some(end) = self.exec.longest_match(&self.lexer, text, start) {
+                    if end > start {
+                        return Some((start, end));
+                    }
                 }
             }
+            start = lexer::next_char_end(text, start);
         }
         None
     }
 
+    /// Covered slice ends of `text` beginning at `start`, including `start`.
+    pub(crate) fn covered_ends(&self, text: &str, start: usize) -> Vec<usize> {
+        self.lexer.covered_ends(text, start)
+    }
+
     /// `true` when the non-empty `text` tokenizes with the first token at
     /// byte 0 and the last token ending at `text.len()`.
+    #[cfg(test)]
     pub(crate) fn covers_text(&self, text: &str) -> bool {
         let spans = self.token_spans(text);
         let count = spans.len().saturating_sub(1);
         count > 0 && spans[0].start == 0 && spans[count - 1].end == text.len()
-    }
-
-    fn accepts_text(&self, text: &str) -> bool {
-        let spans = self.token_spans(text);
-        let count = spans.len().saturating_sub(1);
-        self.derives(&spans, 0, count)
     }
 
     /// Find the leftmost match (see [`CfgParser::find`]) and report the
@@ -367,6 +362,87 @@ impl CfgParser {
         } else {
             let (b0, b1) = Self::slice_bytes(&spans, slice_start + r.start, slice_start + r.end);
             Match::new(b0, b1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod find_oracle {
+    use super::*;
+
+    fn bounds(text: &str) -> Vec<usize> {
+        let mut bounds: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+        bounds.push(text.len());
+        bounds
+    }
+
+    fn brute_find(parser: &CfgParser, text: &str) -> Option<(usize, usize)> {
+        let bounds = bounds(text);
+        for (start_i, &start) in bounds.iter().enumerate() {
+            for &end in bounds[start_i..].iter().rev() {
+                let slice = &text[start..end];
+                if start != end && !parser.covers_text(slice) {
+                    continue;
+                }
+                if parser.is_match(slice) {
+                    return Some((start, end));
+                }
+            }
+        }
+        None
+    }
+
+    fn brute_ends(parser: &CfgParser, text: &str, start: usize) -> Vec<usize> {
+        bounds(text)
+            .into_iter()
+            .filter(|&end| end >= start && (end == start || parser.covers_text(&text[start..end])))
+            .collect()
+    }
+
+    #[test]
+    fn find_matches_covered_slices() {
+        let grammars = [
+            r#"S -> "a""#,
+            r#"S -> "ab""#,
+            r#"S -> "a" "b""#,
+            r#"S -> "ab" "c" | "b""#,
+            r#"S -> "ab" "c" | "a""#,
+            r#"S -> "a" | epsilon"#,
+            r#"S -> epsilon"#,
+            r#"S -> "a" S | epsilon"#,
+            r#"S -> A "b"; A -> "a" A | epsilon"#,
+            r#"S -> "[a-z]+""#,
+            r#"S -> "[a-z]+" | "[a-c]+""#,
+            r#"S -> "ab" | "[a-z]+""#,
+            r#"S -> "[^abc]""#,
+            r#"S -> "é""#,
+            r#"S -> "any""#,
+        ];
+        let texts = [
+            "", "a", "ab", "abc", "a b", "  a", "xa", "xaa", "baaa", "aaa", "é", "aéé", "ab ",
+            "xab", "abc!", "1abcd", "   ", "b a", "abcd", r#""hi""#, "x\"ab",
+        ];
+        for grammar in grammars {
+            let parser = CfgParser::new(grammar).unwrap();
+            for text in texts {
+                assert_eq!(
+                    parser.find_bytes(text),
+                    brute_find(&parser, text),
+                    "{grammar} on {text:?}"
+                );
+                let mut start = 0;
+                while start <= text.len() {
+                    assert_eq!(
+                        parser.covered_ends(text, start),
+                        brute_ends(&parser, text, start),
+                        "ends {grammar} @ {start} in {text:?}"
+                    );
+                    if start == text.len() {
+                        break;
+                    }
+                    start = lexer::next_char_end(text, start);
+                }
+            }
         }
     }
 }

@@ -209,6 +209,7 @@
 
 pub mod cfg_parser;
 pub mod engine;
+mod exec;
 pub mod grammar;
 pub mod lalr;
 pub mod lexer;

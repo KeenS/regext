@@ -1444,6 +1444,7 @@ impl Regex {
     /// grammar's tokens cover it exactly (first token at byte 0, last token
     /// ending at the slice length). Skipped whitespace is therefore not part
     /// of a match span. An empty slice is always a candidate.
+    #[cfg(test)]
     fn covers_span(&self, text: &str, b0: usize, b1: usize) -> bool {
         match &self.body {
             RegexBody::Grammar { cfg, .. } => cfg.covers_text(&text[b0..b1]),
@@ -1466,6 +1467,9 @@ impl Regex {
                 cfg, assertions, ..
             } => {
                 let sub = &text[b0..b1];
+                if assertions.is_empty() {
+                    return cfg.is_match(sub);
+                }
                 let n = cfg.token_spans(sub).len().saturating_sub(1);
                 let Some(reductions) = cfg.slice_reductions(sub, 0, n) else {
                     return false;
@@ -1481,22 +1485,50 @@ impl Regex {
 
     /// The leftmost accepted slice (leftmost start, longest at that start),
     /// as a byte span; `None` when no slice of the input is accepted.
-    /// Candidates are char boundaries. A non-empty slice must be covered by
-    /// its tokens; the empty slice is tried last at that start.
+    /// A non-empty slice must be covered by its tokens; the empty slice is
+    /// tried last at that start.
+    ///
+    /// A plain grammar delegates to the interpreter's leftmost-longest scan.
+    /// Complements, intersections, and assertions still walk covered ends,
+    /// because a slice can be rejected by a side or by an assertion that the
+    /// grammar alone would accept.
     fn find_slice(&self, text: &str) -> Option<(usize, usize)> {
-        let mut bounds: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
-        bounds.push(text.len());
-        for (start_i, &start) in bounds.iter().enumerate() {
-            for &end in bounds[start_i..].iter().rev() {
-                if start != end && !self.covers_span(text, start, end) {
-                    continue;
-                }
+        if let RegexBody::Grammar {
+            cfg, assertions, ..
+        } = &self.body
+        {
+            if assertions.is_empty() {
+                return cfg.find_bytes(text);
+            }
+        }
+        let mut start = 0;
+        loop {
+            let ends = self.candidate_ends(text, start);
+            for &end in ends.iter().rev() {
                 if self.accepts_span(text, start, end) {
                     return Some((start, end));
                 }
             }
+            if start >= text.len() {
+                break;
+            }
+            start = crate::lexer::next_char_end(text, start);
         }
         None
+    }
+
+    /// Covered ends of every grammar under `self`, intersected when both
+    /// sides of an intersection must cover the same slice. The empty end is
+    /// always included.
+    fn candidate_ends(&self, text: &str, start: usize) -> Vec<usize> {
+        match &self.body {
+            RegexBody::Grammar { cfg, .. } => cfg.covered_ends(text, start),
+            RegexBody::Complement(inner) => inner.candidate_ends(text, start),
+            RegexBody::Intersection(left, right) => intersect_ends(
+                &left.candidate_ends(text, start),
+                &right.candidate_ends(text, start),
+            ),
+        }
     }
 
     /// The ENTIRE input must match (anchored at both ends), and every
@@ -1629,5 +1661,77 @@ impl Regex {
             }
         }
         true
+    }
+}
+
+fn intersect_ends(left: &[usize], right: &[usize]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Equal => {
+                out.push(left[i]);
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod find_oracle {
+    use super::*;
+
+    /// The spec of `find`: leftmost char boundary, then the longest covered
+    /// slice `accepts_span` accepts.
+    fn brute(re: &Regex, text: &str) -> Option<(usize, usize)> {
+        let mut bounds: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+        bounds.push(text.len());
+        for (start_i, &start) in bounds.iter().enumerate() {
+            for &end in bounds[start_i..].iter().rev() {
+                if start != end && !re.covers_span(text, start, end) {
+                    continue;
+                }
+                if re.accepts_span(text, start, end) {
+                    return Some((start, end));
+                }
+            }
+        }
+        None
+    }
+
+    fn check(re: &Regex, texts: &[&str]) {
+        for text in texts {
+            assert_eq!(re.find_slice(text), brute(re, text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn find_matches_the_slice_spec() {
+        let texts = [
+            "", "a", "ab", "abc", "a b", "  a", "xa", "xaa", "baa", "aaa", "é", "aéé", "ab ",
+            "xab", "abc!", "1ab", "   ", "b a",
+        ];
+        for pattern in [
+            "a", "ab", "a+", "a*", "a*b", "a|ab", "[a-z]+", "[a-c]", "é", "ab?",
+        ] {
+            let re = Regex::new(pattern).unwrap();
+            check(&re, &texts);
+        }
+        check(&Regex::new("ab").unwrap().not(), &texts);
+        check(&Regex::new("a").unwrap().not(), &texts);
+        check(
+            &Regex::new("a*").unwrap().not(),
+            &["", "a", "aaa", "b", "  "],
+        );
+        let both = Regex::new("a|b").unwrap().and(Regex::new("a|c").unwrap());
+        check(&both, &texts);
+        let look = Regex::new("a(?=b)").unwrap();
+        check(&look, &texts);
+        let neg = Regex::new("a(?!a)").unwrap();
+        check(&neg, &texts);
     }
 }

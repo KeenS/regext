@@ -55,13 +55,41 @@ pub struct TokenSpan {
     pub end: usize,
 }
 
+/// One terminal the scanner can emit, in propose order.
+struct Term {
+    name: String,
+    rank: u8,
+    kind: Kind,
+}
+
+enum Kind {
+    /// The `"any"` quoted-string rule.
+    Any,
+    Run(HashSet<char>),
+    Literal,
+    Class(HashSet<char>),
+    Negated(HashSet<char>),
+}
+
+/// A terminal match that ends at `end` (a byte offset, exclusive).
+pub(crate) struct TermHit<'a> {
+    pub name: &'a str,
+    pub end: usize,
+}
+
+/// A symbol produced by [`Lexer::scan`], borrowed from the lexer when it is
+/// a real terminal.
+pub(crate) enum Lexeme<'a> {
+    Term(&'a str),
+    /// A character no terminal matched, and no OTHER fallback is configured.
+    Raw(char),
+}
+
 /// A maximal-munch tokenizer built from a grammar's terminal set.
 pub struct Lexer {
-    string_rules: Vec<String>,
-    class_runs: Vec<(String, HashSet<char>)>,
-    literals: Vec<String>,
-    char_classes: Vec<(String, HashSet<char>)>,
-    negated_classes: Vec<(String, HashSet<char>)>,
+    /// Propose order: string rules, class-runs, literals, classes, negated
+    /// classes. Equal rank keeps the earlier entry.
+    terms: Vec<Term>,
     /// Terminal emitted for a character that no literal, class, or class-run
     /// mentions. Present only when the grammar has a negated class.
     other: Option<String>,
@@ -79,106 +107,79 @@ impl Lexer {
         let mut other = None;
 
         for terminal in terminals {
-            // A leading NUL marks the synthetic "any other character" terminal
-            // introduced for negated classes. It is not a user literal.
-            if terminal.starts_with('\u{0}') {
-                other = Some(terminal);
-                continue;
-            }
-            let chars: Vec<char> = terminal.chars().collect();
-            if terminal == "any" {
-                // The "any" terminal is a quoted-string token: the lexer matches
-                // a whole double-quoted string as one unit (a backslash escapes
-                // the following character), so structural characters inside the
-                // string are never tokenized on their own.
-                string_rules.push(terminal);
-            } else if chars.len() >= 4
-                && chars[0] == '['
-                && chars[chars.len() - 1] == '+'
-                && chars[chars.len() - 2] == ']'
-            {
-                // A [..]+ terminal is a maximal-munch run: one token of the
-                // longest consecutive stretch of member characters.
-                class_runs.push((terminal, Self::parse_class(&chars[1..chars.len() - 2])));
-            } else if chars.len() >= 4
-                && chars[0] == '['
-                && chars[1] == '^'
-                && chars[chars.len() - 1] == ']'
-            {
-                // A [^..] terminal is a negated class: one character that is
-                // NOT a member. Membership excludes the set, so a literal
-                // member is never tokenized as the negated class.
-                negated_classes.push((terminal, Self::parse_class(&chars[2..chars.len() - 1])));
-            } else if chars.len() >= 3 && chars[0] == '[' && chars[chars.len() - 1] == ']' {
-                char_classes.push((terminal, Self::parse_class(&chars[1..chars.len() - 1])));
-            } else {
-                literals.push(terminal);
+            match classify(&terminal) {
+                Classified::Other => other = Some(terminal),
+                Classified::Any => string_rules.push(Term {
+                    name: terminal,
+                    rank: 5,
+                    kind: Kind::Any,
+                }),
+                Classified::ClassRun(members) => class_runs.push(Term {
+                    name: terminal,
+                    rank: 3,
+                    kind: Kind::Run(members),
+                }),
+                Classified::Negated(members) => negated_classes.push(Term {
+                    name: terminal,
+                    rank: 1,
+                    kind: Kind::Negated(members),
+                }),
+                Classified::Class(members) => char_classes.push(Term {
+                    name: terminal,
+                    rank: 2,
+                    kind: Kind::Class(members),
+                }),
+                Classified::Literal => literals.push(Term {
+                    name: terminal,
+                    rank: 4,
+                    kind: Kind::Literal,
+                }),
             }
         }
 
         // Longest match first so overlapping literals tokenize deterministically.
-        literals.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-        string_rules.sort();
-        class_runs.sort_by(|a, b| a.0.cmp(&b.0));
-        char_classes.sort_by(|a, b| a.0.cmp(&b.0));
-        negated_classes.sort_by(|a, b| a.0.cmp(&b.0));
+        // Equal lengths keep lexicographic order; equal rank then keeps the
+        // earlier candidate.
+        literals.sort_by(|a, b| {
+            b.name
+                .len()
+                .cmp(&a.name.len())
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        string_rules.sort_by(|a, b| a.name.cmp(&b.name));
+        class_runs.sort_by(|a, b| a.name.cmp(&b.name));
+        char_classes.sort_by(|a, b| a.name.cmp(&b.name));
+        negated_classes.sort_by(|a, b| a.name.cmp(&b.name));
 
-        Self {
-            string_rules,
-            class_runs,
-            literals,
-            char_classes,
-            negated_classes,
-            other,
-        }
+        let mut terms = Vec::new();
+        terms.append(&mut string_rules);
+        terms.append(&mut class_runs);
+        terms.append(&mut literals);
+        terms.append(&mut char_classes);
+        terms.append(&mut negated_classes);
+
+        Self { terms, other }
     }
 
-    fn parse_class(inner: &[char]) -> HashSet<char> {
-        let text: String = inner.iter().collect();
-        parse_class_members(&text).unwrap_or_default()
+    /// The negated-class fallback name, when the terminal set has one.
+    pub(crate) fn other_name(&self) -> Option<&str> {
+        self.other.as_deref()
     }
 
     /// Tokenize and record the byte span of every token.
     pub fn tokenize_with_spans(&self, input: &str) -> Vec<TokenSpan> {
-        let chars: Vec<char> = input.chars().collect();
-        let mut byte_off = Vec::with_capacity(chars.len() + 1);
-        let mut acc = 0;
-        byte_off.push(0);
-        for ch in &chars {
-            acc += ch.len_utf8();
-            byte_off.push(acc);
-        }
-
         let mut spans = Vec::new();
-        let mut i = 0;
-
-        while i < chars.len() {
-            if chars[i].is_whitespace() {
-                i += 1;
-                continue;
-            }
-
-            let (symbol, next) = match self.match_symbol(&chars, i) {
-                Some(t) => t,
-                // A negated class's OTHER terminal stands for every character
-                // no literal or class mentioned. Otherwise an unknown character
-                // is still emitted so the parser can reject it precisely.
-                None => {
-                    let symbol = match &self.other {
-                        Some(other) => other.clone(),
-                        None => chars[i].to_string(),
-                    };
-                    (symbol, i + 1)
-                }
+        self.scan(input, |lexeme, start, end| {
+            let symbol = match lexeme {
+                Lexeme::Term(name) => name.to_string(),
+                Lexeme::Raw(ch) => ch.to_string(),
             };
             spans.push(TokenSpan {
                 token: Token::Terminal(symbol),
-                start: byte_off[i],
-                end: byte_off[next],
+                start,
+                end,
             });
-            i = next;
-        }
-
+        });
         spans.push(TokenSpan {
             token: Token::EOF,
             start: input.len(),
@@ -195,83 +196,277 @@ impl Lexer {
             .collect()
     }
 
-    /// Longest match across every terminal kind. On a tie the higher rank
-    /// wins: quoted string, then literal, then class-run, then class, then
-    /// negated class. Equal rank keeps the earlier candidate, and those
-    /// lists are sorted so the result is deterministic.
-    fn match_symbol(&self, chars: &[char], i: usize) -> Option<(String, usize)> {
-        let mut best_end = i;
-        let mut best_rank: u8 = 0;
-        let mut best_sym: Option<String> = None;
-        let mut propose = |end: usize, rank: u8, sym: &str| {
-            if end <= i {
-                return;
-            }
-            let better =
-                best_sym.is_none() || end > best_end || (end == best_end && rank > best_rank);
-            if better {
-                best_end = end;
-                best_rank = rank;
-                best_sym = Some(sym.to_string());
-            }
-        };
-
-        if chars[i] == '"' {
-            for rule in &self.string_rules {
-                if let Some(end) = Self::quoted_end(chars, i) {
-                    propose(end, 5, rule);
-                }
-            }
-        }
-
-        for (run, members) in &self.class_runs {
-            if members.contains(&chars[i]) {
-                let mut end = i + 1;
-                while end < chars.len() && members.contains(&chars[end]) {
-                    end += 1;
-                }
-                propose(end, 3, run);
-            }
-        }
-
-        for literal in &self.literals {
-            let len = literal.chars().count();
-            if len == 0 || i + len > chars.len() {
+    /// Walk every non-whitespace token. Names of real terminals are borrowed
+    /// from the lexer; a raw character is only allocated by the caller.
+    pub(crate) fn scan<'a>(&'a self, input: &str, mut f: impl FnMut(Lexeme<'a>, usize, usize)) {
+        let mut i = 0;
+        while i < input.len() {
+            let ch = char_at(input, i);
+            if ch.is_whitespace() {
+                i += ch.len_utf8();
                 continue;
             }
-            let slice: String = chars[i..i + len].iter().collect();
-            if slice == *literal {
-                propose(i + len, 4, literal);
+            if let Some(hit) = self.best_match(input, i, input.len()) {
+                let end = hit.end;
+                f(Lexeme::Term(hit.name), i, end);
+                i = end;
+            } else {
+                let end = i + ch.len_utf8();
+                if let Some(name) = self.other.as_deref() {
+                    f(Lexeme::Term(name), i, end);
+                } else {
+                    f(Lexeme::Raw(ch), i, end);
+                }
+                i = end;
             }
         }
-
-        for (class, members) in &self.char_classes {
-            if members.contains(&chars[i]) {
-                propose(i + 1, 2, class);
-            }
-        }
-
-        for (class, members) in &self.negated_classes {
-            if !members.contains(&chars[i]) {
-                propose(i + 1, 1, class);
-            }
-        }
-
-        best_sym.map(|sym| (sym, best_end))
     }
 
-    fn quoted_end(chars: &[char], i: usize) -> Option<usize> {
-        // chars[i] == '"': find the index just past the closing quote.
-        let mut j = i + 1;
-        while j < chars.len() {
-            match chars[j] {
-                '\\' => j += 2,
-                '"' => return Some(j + 1),
-                _ => j += 1,
+    /// Longest match at byte `i` that ends at or before `limit`. `limit` and
+    /// `i` are char boundaries. On a tie the higher rank wins; equal rank
+    /// keeps the earlier candidate.
+    pub(crate) fn best_match(&self, input: &str, i: usize, limit: usize) -> Option<TermHit<'_>> {
+        if i >= limit || i >= input.len() {
+            return None;
+        }
+        let ch = char_at(input, i);
+        let mut best_index: Option<usize> = None;
+        let mut best_end = i;
+        let mut best_rank: u8 = 0;
+        for (index, term) in self.terms.iter().enumerate() {
+            let Some(end) = match_term(term, input, i, limit, ch) else {
+                continue;
+            };
+            if end <= i {
+                continue;
+            }
+            let better = best_index.is_none()
+                || end > best_end
+                || (end == best_end && term.rank > best_rank);
+            if better {
+                best_index = Some(index);
+                best_end = end;
+                best_rank = term.rank;
             }
         }
-        None
+        best_index.map(|index| TermHit {
+            name: &self.terms[index].name,
+            end: best_end,
+        })
     }
+
+    /// Byte ends `e` such that `text[start..e]` is covered by its own tokens,
+    /// plus `start` itself (the empty slice). Leading whitespace yields only
+    /// the empty end: the first token would not sit at byte 0 of the slice.
+    ///
+    /// Along a covered slice every token but the last is the greedy token of
+    /// the suffix (a longer match also fits). The last token is the longest
+    /// match that ends at the slice. Ends strictly inside a greedy token are
+    /// the covered ends of that shorter window, where the greedy match no
+    /// longer fits and a shorter terminal or raw characters do.
+    pub(crate) fn covered_ends(&self, text: &str, start: usize) -> Vec<usize> {
+        let mut ends = vec![start];
+        if start >= text.len() || char_at(text, start).is_whitespace() {
+            return ends;
+        }
+        // (position, exclusive limit). Both are char boundaries.
+        let mut stack = vec![(start, text.len())];
+        while let Some((mut pos, limit)) = stack.pop() {
+            if pos >= limit || pos >= text.len() {
+                continue;
+            }
+            if pos != start && char_at(text, pos).is_whitespace() {
+                pos = skip_ws(text, pos, limit);
+                if pos >= limit || pos >= text.len() {
+                    continue;
+                }
+            }
+            if let Some(hit) = self.best_match(text, pos, limit) {
+                ends.push(hit.end);
+                let prev = prev_char_boundary(text, hit.end);
+                if hit.end < limit {
+                    stack.push((hit.end, limit));
+                }
+                if prev > pos {
+                    stack.push((pos, prev));
+                }
+            } else {
+                let ch = char_at(text, pos);
+                let end = pos + ch.len_utf8();
+                if end <= limit {
+                    ends.push(end);
+                    stack.push((end, limit));
+                }
+            }
+        }
+        ends.sort_unstable();
+        ends.dedup();
+        ends
+    }
+}
+
+fn match_term(term: &Term, input: &str, i: usize, limit: usize, ch: char) -> Option<usize> {
+    match &term.kind {
+        Kind::Any => {
+            if ch != '"' {
+                return None;
+            }
+            quoted_end(input, i, limit)
+        }
+        Kind::Run(members) => run_end(input, i, limit, members),
+        Kind::Literal => {
+            let len = term.name.len();
+            if len == 0 || i + len > limit {
+                return None;
+            }
+            if input[i..].starts_with(term.name.as_str()) {
+                Some(i + len)
+            } else {
+                None
+            }
+        }
+        Kind::Class(members) => {
+            if !members.contains(&ch) {
+                return None;
+            }
+            let end = i + ch.len_utf8();
+            (end <= limit).then_some(end)
+        }
+        Kind::Negated(members) => {
+            if members.contains(&ch) {
+                return None;
+            }
+            let end = i + ch.len_utf8();
+            (end <= limit).then_some(end)
+        }
+    }
+}
+
+fn run_end(input: &str, i: usize, limit: usize, members: &HashSet<char>) -> Option<usize> {
+    if i >= limit {
+        return None;
+    }
+    let ch = char_at(input, i);
+    if !members.contains(&ch) {
+        return None;
+    }
+    let mut end = i + ch.len_utf8();
+    while end < limit {
+        let c = char_at(input, end);
+        if !members.contains(&c) {
+            break;
+        }
+        end += c.len_utf8();
+    }
+    Some(end)
+}
+
+fn quoted_end(input: &str, i: usize, limit: usize) -> Option<usize> {
+    // `input[i]` is the opening quote. A backslash escapes one character.
+    // The match fails when the closing quote lies past `limit`.
+    let mut j = i + 1;
+    while j < limit {
+        let ch = char_at(input, j);
+        match ch {
+            '\\' => {
+                let next = j + ch.len_utf8();
+                if next >= limit {
+                    return None;
+                }
+                let escaped = char_at(input, next);
+                j = next + escaped.len_utf8();
+            }
+            '"' => return Some(j + ch.len_utf8()),
+            _ => j += ch.len_utf8(),
+        }
+    }
+    None
+}
+
+enum Classified {
+    Other,
+    Any,
+    ClassRun(HashSet<char>),
+    Negated(HashSet<char>),
+    Class(HashSet<char>),
+    Literal,
+}
+
+/// Same shapes [`Lexer::new`] recognizes. A leading NUL is the synthetic
+/// OTHER terminal, never a user literal. Class-runs are detected before
+/// negated classes, so `[^a]+` stays a run of `^` and `a`.
+fn classify(terminal: &str) -> Classified {
+    if terminal.starts_with('\u{0}') {
+        return Classified::Other;
+    }
+    if terminal == "any" {
+        return Classified::Any;
+    }
+    let chars: Vec<char> = terminal.chars().collect();
+    if chars.len() >= 4
+        && chars[0] == '['
+        && chars[chars.len() - 1] == '+'
+        && chars[chars.len() - 2] == ']'
+    {
+        let inner: String = chars[1..chars.len() - 2].iter().collect();
+        return Classified::ClassRun(parse_class_members(&inner).unwrap_or_default());
+    }
+    if chars.len() >= 4 && chars[0] == '[' && chars[1] == '^' && chars[chars.len() - 1] == ']' {
+        let inner: String = chars[2..chars.len() - 1].iter().collect();
+        return Classified::Negated(parse_class_members(&inner).unwrap_or_default());
+    }
+    if chars.len() >= 3 && chars[0] == '[' && chars[chars.len() - 1] == ']' {
+        let inner: String = chars[1..chars.len() - 1].iter().collect();
+        return Classified::Class(parse_class_members(&inner).unwrap_or_default());
+    }
+    Classified::Literal
+}
+
+/// Characters that can begin a match of this terminal, or `None` when that
+/// set is open-ended (a negated class, or the OTHER fallback).
+pub(crate) fn terminal_start_chars(terminal: &str) -> Option<HashSet<char>> {
+    match classify(terminal) {
+        Classified::Other | Classified::Negated(_) => None,
+        Classified::Any => Some(HashSet::from(['"'])),
+        Classified::ClassRun(members) | Classified::Class(members) => Some(members),
+        Classified::Literal => match terminal.chars().next() {
+            Some(ch) => Some(HashSet::from([ch])),
+            None => Some(HashSet::new()),
+        },
+    }
+}
+
+pub(crate) fn char_at(text: &str, index: usize) -> char {
+    text[index..]
+        .chars()
+        .next()
+        .expect("index is a char boundary")
+}
+
+pub(crate) fn next_char_end(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return index;
+    }
+    index + char_at(text, index).len_utf8()
+}
+
+pub(crate) fn prev_char_boundary(text: &str, index: usize) -> usize {
+    let mut prev = index - 1;
+    while !text.is_char_boundary(prev) {
+        prev -= 1;
+    }
+    prev
+}
+
+pub(crate) fn skip_ws(text: &str, mut index: usize, limit: usize) -> usize {
+    while index < limit {
+        let ch = char_at(text, index);
+        if !ch.is_whitespace() {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    index
 }
 
 /// Members of a class body (`a`, `a-z`, a hyphen at either edge). A range

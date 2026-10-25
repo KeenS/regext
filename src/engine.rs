@@ -22,7 +22,7 @@
 use std::fmt::Debug;
 
 /// The action a table prescribes for a `(state, lookahead)` pair.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
     /// Push the input symbol and move to the given state.
     Shift(usize),
