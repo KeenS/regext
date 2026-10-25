@@ -4,13 +4,17 @@
 //! exactly the sorted-item, last-write-wins construction. Matching then runs
 //! on integer symbol ids: action and goto never allocate, and a find walks
 //! each start at most once instead of re-tokenizing every character slice.
+//! Conflict-free grammars also get a literal prefilter: a fixed-string search
+//! when every match is one literal, a required-literal reject, a prefix
+//! search (`str::find`, the Two-Way algorithm), and a byte-class scan of
+//! FIRST.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::engine::{Action, Reduction};
 use crate::grammar::Symbol;
 use crate::lalr::LalrTable;
-use crate::lexer::{self, Lexeme, Lexer};
+use crate::lexer::{self, ByteSet, Lexeme, Lexer};
 
 const UNKNOWN: u32 = u32::MAX;
 
@@ -30,6 +34,10 @@ pub(crate) struct Exec {
     /// Characters that can begin a non-empty match. `None` means the set is
     /// open-ended (a negated class or the OTHER fallback is in FIRST).
     first_chars: Option<HashSet<char>>,
+    /// Literal and byte-class accelerators. Off when the table has a
+    /// conflict: last-write-wins can accept a different language than the
+    /// productions describe.
+    accel: Option<Accel>,
 }
 
 struct Cursor {
@@ -64,6 +72,8 @@ impl Exec {
         table: &LalrTable<String>,
         start: &str,
         first_chars: Option<HashSet<char>>,
+        prods: &[(Symbol, Vec<Symbol>)],
+        conflicts: usize,
     ) -> Self {
         let mut ids: HashMap<String, u32> = HashMap::new();
         let mut names: Vec<String> = Vec::new();
@@ -110,13 +120,146 @@ impl Exec {
             start_id,
             nullable: false,
             first_chars,
+            accel: None,
         };
         exec.nullable = exec.accepts_ids(&[]);
+        if conflicts == 0 {
+            exec.accel = Some(Accel::analyze(prods, start, exec.first_chars.as_ref()));
+        }
         exec
     }
 
-    pub(crate) fn nullable(&self) -> bool {
-        self.nullable
+    /// `Some` when a literal prefilter decides an anchored match.
+    pub(crate) fn anchored_shortcut(&self, text: &str) -> Option<bool> {
+        let accel = self.accel.as_ref()?;
+        let core = text.trim();
+        if core.is_empty() {
+            return Some(self.nullable);
+        }
+        if let Some(lits) = &accel.literals {
+            return Some(lits.iter().any(|lit| lit == core));
+        }
+        if accel
+            .required
+            .iter()
+            .any(|lit| !core.contains(lit.as_str()))
+        {
+            return Some(false);
+        }
+        if !accel.prefix.is_empty() && !core.starts_with(accel.prefix.as_str()) {
+            return Some(false);
+        }
+        if let Some(suffixes) = &accel.suffixes {
+            if !suffixes.iter().any(|lit| core.ends_with(lit.as_str())) {
+                return Some(false);
+            }
+        }
+        None
+    }
+
+    /// Leftmost-longest covered match. Conflict-free grammars use the literal
+    /// prefilter; conflicted grammars scan candidate starts.
+    pub(crate) fn find_in(&self, lexer: &Lexer, text: &str) -> Option<(usize, usize)> {
+        let Some(accel) = self.accel.as_ref() else {
+            return self.find_general(lexer, text);
+        };
+        self.find_fast(lexer, text, accel)
+    }
+
+    fn find_general(&self, lexer: &Lexer, text: &str) -> Option<(usize, usize)> {
+        if self.nullable {
+            return self.longest_match(lexer, text, 0).map(|end| (0, end));
+        }
+        let mut start = 0;
+        while start < text.len() {
+            if self.may_start(text, start) {
+                if let Some(end) = self.longest_match(lexer, text, start) {
+                    if end > start {
+                        return Some((start, end));
+                    }
+                }
+            }
+            start = lexer::next_char_end(text, start);
+        }
+        None
+    }
+
+    fn find_fast(&self, lexer: &Lexer, text: &str, accel: &Accel) -> Option<(usize, usize)> {
+        if self.nullable {
+            if let Some(lits) = &accel.literals {
+                let end = longest_literal_at(text, 0, lits).unwrap_or(0);
+                return Some((0, end));
+            }
+            if !fast_may_start(text, 0, accel.first_bytes) || missing_literal(&accel.required, text)
+            {
+                return Some((0, 0));
+            }
+            return self.longest_match(lexer, text, 0).map(|end| (0, end));
+        }
+        if let Some(lits) = &accel.literals {
+            return find_literals(text, lits);
+        }
+        if missing_literal(&accel.required, text) {
+            return None;
+        }
+        if !accel.prefix.is_empty() {
+            return self.find_prefixed(lexer, text, &accel.prefix);
+        }
+        self.find_scanned(lexer, text, accel.first_bytes)
+    }
+
+    fn find_prefixed(&self, lexer: &Lexer, text: &str, prefix: &str) -> Option<(usize, usize)> {
+        let mut from = 0;
+        while from < text.len() {
+            let Some(rel) = text[from..].find(prefix) else {
+                return None;
+            };
+            let start = from + rel;
+            if let Some(end) = self.longest_match(lexer, text, start) {
+                if end > start {
+                    return Some((start, end));
+                }
+            }
+            let next = lexer::next_char_end(text, start);
+            if next <= start {
+                break;
+            }
+            from = next;
+        }
+        None
+    }
+
+    fn find_scanned(
+        &self,
+        lexer: &Lexer,
+        text: &str,
+        first_bytes: Option<ByteSet>,
+    ) -> Option<(usize, usize)> {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+        while start < bytes.len() {
+            match first_bytes {
+                Some(bits) => {
+                    if !bits.contains(bytes[start]) {
+                        start += 1;
+                        continue;
+                    }
+                }
+                None => {
+                    if lexer::char_at(text, start).is_whitespace() {
+                        start = lexer::next_char_end(text, start);
+                        continue;
+                    }
+                }
+            }
+            if let Some(end) = self.longest_match(lexer, text, start) {
+                if end > start {
+                    return Some((start, end));
+                }
+            }
+            start = lexer::next_char_end(text, start);
+        }
+        None
     }
 
     /// `false` when no non-empty covered slice can start at `start`.
@@ -647,4 +790,513 @@ pub(crate) fn first_chars(prods: &[(Symbol, Vec<Symbol>)], start: &str) -> Optio
         }
     }
     Some(chars)
+}
+
+/// Search accelerators derived from a conflict-free grammar.
+struct Accel {
+    /// Literals that occur in every non-empty derivation, longest first.
+    required: Vec<String>,
+    /// Longest string every possible first literal starts with.
+    prefix: String,
+    /// Set when every non-empty yield is exactly one of these literals,
+    /// longest first.
+    literals: Option<Vec<String>>,
+    /// Literal terminals that can end a non-empty yield. `None` when a
+    /// non-literal terminal can be last, so a suffix check would be wrong.
+    suffixes: Option<Vec<String>>,
+    /// Leading bytes of FIRST. `None` when FIRST is open-ended.
+    first_bytes: Option<ByteSet>,
+}
+
+impl Accel {
+    fn analyze(
+        prods: &[(Symbol, Vec<Symbol>)],
+        start: &str,
+        first_chars: Option<&HashSet<char>>,
+    ) -> Self {
+        let grouped = group_productions(prods);
+        let nullable = nullable_names(prods);
+        let required = required_literals(prods, start, &nullable);
+        let front = edge_literals(prods, &nullable, false);
+        let back = edge_literals(prods, &nullable, true);
+        let prefix = match front.get(start) {
+            Some(LitSet::Closed(set)) => longest_common_prefix(set),
+            _ => String::new(),
+        };
+        let suffixes = match back.get(start) {
+            Some(LitSet::Open) => None,
+            Some(LitSet::Closed(set)) => Some(set.iter().cloned().collect()),
+            None => Some(Vec::new()),
+        };
+        Self {
+            required,
+            prefix,
+            literals: pure_literals(&grouped, start),
+            suffixes,
+            first_bytes: first_chars.map(ByteSet::from_first_chars),
+        }
+    }
+}
+
+fn fast_may_start(text: &str, start: usize, first_bytes: Option<ByteSet>) -> bool {
+    if start >= text.len() {
+        return false;
+    }
+    match first_bytes {
+        None => !lexer::char_at(text, start).is_whitespace(),
+        Some(bits) => bits.contains(text.as_bytes()[start]),
+    }
+}
+
+fn missing_literal(required: &[String], text: &str) -> bool {
+    required.iter().any(|lit| !text.contains(lit.as_str()))
+}
+
+/// Longest literal in `lits` (already longest-first) that matches at `at`.
+fn longest_literal_at(text: &str, at: usize, lits: &[String]) -> Option<usize> {
+    let rest = text.get(at..)?;
+    for lit in lits {
+        if rest.starts_with(lit.as_str()) {
+            return Some(at + lit.len());
+        }
+    }
+    None
+}
+
+/// Leftmost start at which any literal matches, then the longest literal there.
+fn find_literals(text: &str, lits: &[String]) -> Option<(usize, usize)> {
+    if lits.is_empty() {
+        return None;
+    }
+    if lits.len() == 1 {
+        let lit = &lits[0];
+        return text.find(lit.as_str()).map(|at| (at, at + lit.len()));
+    }
+    if lits.iter().all(|lit| lit.len() == 1 && lit.is_ascii()) {
+        let mut bits = ByteSet::new();
+        for lit in lits {
+            bits.insert(lit.as_bytes()[0]);
+        }
+        return text
+            .bytes()
+            .position(|byte| bits.contains(byte))
+            .map(|at| (at, at + 1));
+    }
+    if lits.len() <= 8 {
+        let mut best: Option<usize> = None;
+        for lit in lits {
+            if let Some(at) = text.find(lit.as_str()) {
+                best = Some(best.map_or(at, |have| have.min(at)));
+            }
+        }
+        let at = best?;
+        return longest_literal_at(text, at, lits).map(|end| (at, end));
+    }
+    let mut bits = ByteSet::new();
+    for lit in lits {
+        bits.insert(lit.as_bytes()[0]);
+    }
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bits.contains(bytes[index])
+            && text.is_char_boundary(index)
+            && let Some(end) = longest_literal_at(text, index, lits)
+        {
+            return Some((index, end));
+        }
+        index += 1;
+    }
+    None
+}
+
+fn group_productions(prods: &[(Symbol, Vec<Symbol>)]) -> HashMap<&str, Vec<&[Symbol]>> {
+    let mut map: HashMap<&str, Vec<&[Symbol]>> = HashMap::new();
+    for (lhs, rhs) in prods {
+        if let Symbol::NonTerminal(name) = lhs {
+            map.entry(name.as_str()).or_default().push(rhs.as_slice());
+        }
+    }
+    map
+}
+
+fn nullable_names(prods: &[(Symbol, Vec<Symbol>)]) -> HashSet<String> {
+    let mut nullable = HashSet::new();
+    loop {
+        let before = nullable.len();
+        for (lhs, rhs) in prods {
+            let Symbol::NonTerminal(name) = lhs else {
+                continue;
+            };
+            if nullable.contains(name) {
+                continue;
+            }
+            let all = rhs.iter().all(|sym| match sym {
+                Symbol::NonTerminal(n) => nullable.contains(n),
+                _ => false,
+            });
+            if all {
+                nullable.insert(name.clone());
+            }
+        }
+        if nullable.len() == before {
+            break;
+        }
+    }
+    nullable
+}
+
+#[derive(Clone)]
+struct Req {
+    /// `true` when the symbol has a finite non-empty yield.
+    nonempty: bool,
+    /// Literals in every non-empty yield. Empty means those yields share
+    /// no single literal.
+    must: HashSet<String>,
+}
+
+fn required_literals(
+    prods: &[(Symbol, Vec<Symbol>)],
+    start: &str,
+    nullable: &HashSet<String>,
+) -> Vec<String> {
+    let mut universe = HashSet::new();
+    let mut names = HashSet::new();
+    for (lhs, rhs) in prods {
+        if let Symbol::NonTerminal(name) = lhs {
+            names.insert(name.clone());
+        }
+        for sym in rhs {
+            if let Symbol::Terminal(name) = sym
+                && let Some(lit) = lexer::literal_needle(name)
+            {
+                universe.insert(lit.to_string());
+            }
+        }
+    }
+    // Top of the intersection lattice. Productions shrink it.
+    let mut info: HashMap<String, Req> = names
+        .into_iter()
+        .map(|name| {
+            (
+                name,
+                Req {
+                    nonempty: true,
+                    must: universe.clone(),
+                },
+            )
+        })
+        .collect();
+    let grouped = group_productions(prods);
+    loop {
+        let snapshot = info.clone();
+        let mut changed = false;
+        for (name, rhss) in &grouped {
+            let mut nonempty = false;
+            let mut must: Option<HashSet<String>> = None;
+            for rhs in rhss {
+                let seq = sequence_req(rhs, nullable, &snapshot);
+                if !seq.nonempty {
+                    continue;
+                }
+                nonempty = true;
+                must = Some(match must {
+                    None => seq.must,
+                    Some(prev) => {
+                        let mut both = prev;
+                        both.retain(|lit| seq.must.contains(lit));
+                        both
+                    }
+                });
+            }
+            let next = if nonempty {
+                Req {
+                    nonempty: true,
+                    must: must.unwrap_or_default(),
+                }
+            } else {
+                Req {
+                    nonempty: false,
+                    must: HashSet::new(),
+                }
+            };
+            let Some(entry) = info.get_mut(*name) else {
+                continue;
+            };
+            if entry.nonempty != next.nonempty || entry.must != next.must {
+                *entry = next;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let Some(req) = info.get(start) else {
+        return Vec::new();
+    };
+    if !req.nonempty {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = req.must.iter().cloned().collect();
+    out.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    out
+}
+
+/// Literals forced by one production's non-empty yields.
+///
+/// A non-nullable symbol is in every yield, so its literals are required.
+/// When every symbol is nullable, a non-empty yield can be any one of them,
+/// so only the intersection is required. `S -> N` with `N` nullable therefore
+/// requires whatever `N` requires, which is how `([a|b])*` avoids demanding
+/// both `a` and `|`.
+fn sequence_req(rhs: &[Symbol], nullable: &HashSet<String>, info: &HashMap<String, Req>) -> Req {
+    let mut any_nonempty = false;
+    let mut saw_non_nullable = false;
+    let mut forced = HashSet::new();
+    let mut optional = Vec::new();
+    for sym in rhs {
+        match sym {
+            Symbol::End => {}
+            Symbol::Terminal(text) => {
+                any_nonempty = true;
+                saw_non_nullable = true;
+                if let Some(lit) = lexer::literal_needle(text) {
+                    forced.insert(lit.to_string());
+                }
+            }
+            Symbol::NonTerminal(name) => {
+                let Some(req) = info.get(name) else {
+                    continue;
+                };
+                if !nullable.contains(name) {
+                    any_nonempty = true;
+                    saw_non_nullable = true;
+                    forced.extend(req.must.iter().cloned());
+                } else if req.nonempty {
+                    any_nonempty = true;
+                    optional.push(req.must.clone());
+                }
+            }
+        }
+    }
+    if !any_nonempty {
+        return Req {
+            nonempty: false,
+            must: HashSet::new(),
+        };
+    }
+    if !saw_non_nullable {
+        let mut sets = optional.into_iter();
+        forced = sets.next().unwrap_or_default();
+        for set in sets {
+            forced.retain(|lit| set.contains(lit));
+        }
+    }
+    Req {
+        nonempty: true,
+        must: forced,
+    }
+}
+
+#[derive(Clone)]
+enum LitSet {
+    Open,
+    Closed(HashSet<String>),
+}
+
+fn edge_literals(
+    prods: &[(Symbol, Vec<Symbol>)],
+    nullable: &HashSet<String>,
+    from_right: bool,
+) -> HashMap<String, LitSet> {
+    let mut edge: HashMap<String, LitSet> = HashMap::new();
+    for (lhs, _) in prods {
+        if let Symbol::NonTerminal(name) = lhs {
+            edge.entry(name.clone())
+                .or_insert_with(|| LitSet::Closed(HashSet::new()));
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (lhs, rhs) in prods {
+            let Symbol::NonTerminal(name) = lhs else {
+                continue;
+            };
+            let contrib = sequence_edge(rhs, nullable, &edge, from_right);
+            let entry = edge.get_mut(name).expect("every lhs is seeded");
+            if merge_lits(entry, contrib) {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    edge
+}
+
+fn merge_lits(entry: &mut LitSet, contrib: LitSet) -> bool {
+    match entry {
+        LitSet::Open => false,
+        LitSet::Closed(_) if matches!(contrib, LitSet::Open) => {
+            *entry = LitSet::Open;
+            true
+        }
+        LitSet::Closed(have) => {
+            let LitSet::Closed(more) = contrib else {
+                return false;
+            };
+            let before = have.len();
+            have.extend(more);
+            have.len() != before
+        }
+    }
+}
+
+fn sequence_edge(
+    rhs: &[Symbol],
+    nullable: &HashSet<String>,
+    edge: &HashMap<String, LitSet>,
+    from_right: bool,
+) -> LitSet {
+    if rhs.is_empty() {
+        return LitSet::Closed(HashSet::new());
+    }
+    let mut acc = HashSet::new();
+    let last = rhs.len() - 1;
+    for step in 0..rhs.len() {
+        let sym = if from_right {
+            &rhs[last - step]
+        } else {
+            &rhs[step]
+        };
+        match sym {
+            Symbol::End => {}
+            Symbol::Terminal(text) => {
+                if let Some(lit) = lexer::literal_needle(text) {
+                    acc.insert(lit.to_string());
+                    return LitSet::Closed(acc);
+                }
+                return LitSet::Open;
+            }
+            Symbol::NonTerminal(name) => {
+                match edge.get(name) {
+                    Some(LitSet::Open) => return LitSet::Open,
+                    Some(LitSet::Closed(set)) => acc.extend(set.iter().cloned()),
+                    None => {}
+                }
+                if !nullable.contains(name) {
+                    return LitSet::Closed(acc);
+                }
+            }
+        }
+    }
+    LitSet::Closed(acc)
+}
+
+fn longest_common_prefix(set: &HashSet<String>) -> String {
+    let mut iter = set.iter();
+    let Some(first) = iter.next() else {
+        return String::new();
+    };
+    let mut prefix = first.clone();
+    for other in iter {
+        while !other.starts_with(&prefix) {
+            prefix.pop();
+            if prefix.is_empty() {
+                return prefix;
+            }
+        }
+    }
+    prefix
+}
+
+#[derive(Clone)]
+enum Yield {
+    Complex,
+    One(HashSet<String>),
+}
+
+enum Memo {
+    Visiting,
+    Done(Yield),
+}
+
+enum Piece {
+    Lit(String),
+    Many(HashSet<String>),
+}
+
+fn pure_literals(prods: &HashMap<&str, Vec<&[Symbol]>>, start: &str) -> Option<Vec<String>> {
+    let mut memo = HashMap::new();
+    match yields(start, prods, &mut memo) {
+        Yield::Complex => None,
+        Yield::One(set) => {
+            let mut lits: Vec<String> = set.into_iter().collect();
+            lits.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+            Some(lits)
+        }
+    }
+}
+
+fn yields<'a>(
+    name: &'a str,
+    prods: &HashMap<&'a str, Vec<&'a [Symbol]>>,
+    memo: &mut HashMap<&'a str, Memo>,
+) -> Yield {
+    match memo.get(name) {
+        Some(Memo::Visiting) => return Yield::Complex,
+        Some(Memo::Done(done)) => return done.clone(),
+        None => {}
+    }
+    memo.insert(name, Memo::Visiting);
+    let Some(rhss) = prods.get(name) else {
+        let empty = Yield::One(HashSet::new());
+        memo.insert(name, Memo::Done(empty.clone()));
+        return empty;
+    };
+    let mut acc = HashSet::new();
+    for rhs in rhss {
+        let mut pieces = Vec::new();
+        let mut complex = false;
+        for sym in *rhs {
+            match sym {
+                Symbol::End => {}
+                Symbol::Terminal(text) => match lexer::literal_needle(text) {
+                    Some(lit) => pieces.push(Piece::Lit(lit.to_string())),
+                    None => {
+                        complex = true;
+                        break;
+                    }
+                },
+                Symbol::NonTerminal(n) => match yields(n, prods, memo) {
+                    Yield::Complex => {
+                        complex = true;
+                        break;
+                    }
+                    Yield::One(set) if set.is_empty() => {}
+                    Yield::One(set) => pieces.push(Piece::Many(set)),
+                },
+            }
+            if pieces.len() > 1 {
+                complex = true;
+                break;
+            }
+        }
+        if complex || pieces.len() > 1 {
+            memo.insert(name, Memo::Done(Yield::Complex));
+            return Yield::Complex;
+        }
+        match pieces.pop() {
+            None => {}
+            Some(Piece::Lit(lit)) => {
+                acc.insert(lit);
+            }
+            Some(Piece::Many(set)) => acc.extend(set),
+        }
+    }
+    let done = Yield::One(acc);
+    memo.insert(name, Memo::Done(done.clone()));
+    done
 }

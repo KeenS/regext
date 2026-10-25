@@ -34,7 +34,7 @@ use crate::engine::Reduction;
 use crate::exec::Exec;
 use crate::grammar::{self, GrammarRegistry, Symbol};
 use crate::lalr::LRCompiler;
-use crate::lexer::{self, Lexer, Token, TokenSpan};
+use crate::lexer::{Lexer, Token, TokenSpan};
 
 /// Error returned by [`CfgParser::new`]: the grammar string was malformed
 /// (a production without `->`, or no productions at all).
@@ -146,7 +146,13 @@ impl CfgParser {
         let first_chars = crate::exec::first_chars(&registry.productions, &start_symbol);
         let table = LRCompiler::compile::<String>(&registry);
         let conflicts = table.conflict_count();
-        let exec = Exec::from_table(&table, &start_symbol, first_chars);
+        let exec = Exec::from_table(
+            &table,
+            &start_symbol,
+            first_chars,
+            &registry.productions,
+            conflicts,
+        );
         let lexer = Lexer::new(terminals);
         Ok(Self {
             lexer,
@@ -158,6 +164,9 @@ impl CfgParser {
     /// Anchored match: `true` when every token of `text` derives the start
     /// symbol. The lexer skips whitespace, so surrounding spaces still match.
     pub fn is_match(&self, text: &str) -> bool {
+        if let Some(answer) = self.exec.anchored_shortcut(text) {
+            return answer;
+        }
         self.exec.accepts_text(&self.lexer, text)
     }
 
@@ -281,27 +290,12 @@ impl CfgParser {
     /// the start symbol. Longest end at that start wins.
     ///
     /// A nullable grammar matches the empty slice at byte 0, so no later
-    /// start is examined. Every other start whose first character cannot
-    /// begin a FIRST terminal is skipped without tokenizing.
+    /// start is examined. Conflict-free grammars search with a literal
+    /// prefilter (fixed strings, a required literal, or a FIRST-byte scan).
+    /// Every other start whose first character cannot begin a FIRST terminal
+    /// is skipped without tokenizing.
     pub(crate) fn find_bytes(&self, text: &str) -> Option<(usize, usize)> {
-        if self.exec.nullable() {
-            return self
-                .exec
-                .longest_match(&self.lexer, text, 0)
-                .map(|end| (0, end));
-        }
-        let mut start = 0;
-        while start < text.len() {
-            if self.exec.may_start(text, start) {
-                if let Some(end) = self.exec.longest_match(&self.lexer, text, start) {
-                    if end > start {
-                        return Some((start, end));
-                    }
-                }
-            }
-            start = lexer::next_char_end(text, start);
-        }
-        None
+        self.exec.find_in(&self.lexer, text)
     }
 
     /// Covered slice ends of `text` beginning at `start`, including `start`.
@@ -369,6 +363,7 @@ impl CfgParser {
 #[cfg(test)]
 mod find_oracle {
     use super::*;
+    use crate::lexer;
 
     fn bounds(text: &str) -> Vec<usize> {
         let mut bounds: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
@@ -384,7 +379,7 @@ mod find_oracle {
                 if start != end && !parser.covers_text(slice) {
                     continue;
                 }
-                if parser.is_match(slice) {
+                if parser.exec.accepts_text(&parser.lexer, slice) {
                     return Some((start, end));
                 }
             }
@@ -417,14 +412,29 @@ mod find_oracle {
             r#"S -> "[^abc]""#,
             r#"S -> "é""#,
             r#"S -> "any""#,
+            r#"S -> "test""#,
+            r#"S -> "ab" | "a""#,
+            r#"S -> "hello" | "h""#,
+            r#"S -> "ab" "c""#,
+            r#"S -> "test" "x" | "testing""#,
+            r#"S -> "[a-c]""#,
+            r#"S -> "aa""#,
+            r#"S -> "a" "b" | "ab""#,
+            r#"S -> C S | epsilon; C -> "a" | "|" | "b""#,
         ];
         let texts = [
             "", "a", "ab", "abc", "a b", "  a", "xa", "xaa", "baaa", "aaa", "é", "aéé", "ab ",
-            "xab", "abc!", "1abcd", "   ", "b a", "abcd", r#""hi""#, "x\"ab",
+            "xab", "abc!", "1abcd", "   ", "b a", "abcd", r#""hi""#, "x\"ab", "test", "xxxtest",
+            "test x", "aaab", "a b c", "hello", "ab c", "xhello", "testing", "h",
         ];
         for grammar in grammars {
             let parser = CfgParser::new(grammar).unwrap();
             for text in texts {
+                assert_eq!(
+                    parser.is_match(text),
+                    parser.exec.accepts_text(&parser.lexer, text),
+                    "is_match {grammar} on {text:?}"
+                );
                 assert_eq!(
                     parser.find_bytes(text),
                     brute_find(&parser, text),

@@ -60,15 +60,98 @@ struct Term {
     name: String,
     rank: u8,
     kind: Kind,
+    /// Bytes that can begin a match. `None` means the term can start on
+    /// almost any byte (a negated class), so the scanner must try it.
+    first_bytes: Option<ByteSet>,
 }
 
 enum Kind {
     /// The `"any"` quoted-string rule.
     Any,
-    Run(HashSet<char>),
+    Run(CharSet),
     Literal,
-    Class(HashSet<char>),
-    Negated(HashSet<char>),
+    Class(CharSet),
+    Negated(CharSet),
+}
+
+/// ASCII membership as four `u64` words. A byte `b` is present when bit
+/// `b` of the set is set.
+#[derive(Clone, Copy)]
+pub(crate) struct ByteSet([u64; 4]);
+
+impl ByteSet {
+    pub(crate) fn new() -> Self {
+        Self([0; 4])
+    }
+
+    pub(crate) fn byte(byte: u8) -> Self {
+        let mut set = Self::new();
+        set.insert(byte);
+        set
+    }
+
+    pub(crate) fn insert(&mut self, byte: u8) {
+        self.0[(byte >> 6) as usize] |= 1u64 << (byte & 63);
+    }
+
+    pub(crate) fn contains(self, byte: u8) -> bool {
+        self.0[(byte >> 6) as usize] & (1u64 << (byte & 63)) != 0
+    }
+
+    /// Leading bytes of `chars`, skipping whitespace. Used as a reject
+    /// filter: a byte absent from the set cannot begin a FIRST character.
+    pub(crate) fn from_first_chars(chars: &HashSet<char>) -> Self {
+        let mut set = Self::new();
+        for &ch in chars {
+            if ch.is_whitespace() {
+                continue;
+            }
+            let mut buf = [0u8; 4];
+            let encoded = ch.encode_utf8(&mut buf);
+            set.insert(encoded.as_bytes()[0]);
+        }
+        set
+    }
+}
+
+/// Character-class membership. ASCII is a bitset; everything else stays in
+/// a set so a class-run can scan ASCII bytes without hashing.
+struct CharSet {
+    ascii: ByteSet,
+    other: HashSet<char>,
+}
+
+impl CharSet {
+    fn from_members(members: HashSet<char>) -> Self {
+        let mut ascii = ByteSet::new();
+        let mut other = HashSet::new();
+        for ch in members {
+            if ch.is_ascii() {
+                ascii.insert(ch as u8);
+            } else {
+                other.insert(ch);
+            }
+        }
+        Self { ascii, other }
+    }
+
+    fn contains(&self, ch: char) -> bool {
+        if ch.is_ascii() {
+            self.ascii.contains(ch as u8)
+        } else {
+            self.other.contains(&ch)
+        }
+    }
+
+    fn first_bytes(&self) -> ByteSet {
+        let mut bytes = self.ascii;
+        for &ch in &self.other {
+            let mut buf = [0u8; 4];
+            let encoded = ch.encode_utf8(&mut buf);
+            bytes.insert(encoded.as_bytes()[0]);
+        }
+        bytes
+    }
 }
 
 /// A terminal match that ends at `end` (a byte offset, exclusive).
@@ -95,6 +178,17 @@ pub struct Lexer {
     other: Option<String>,
 }
 
+impl Term {
+    fn filtered(name: String, rank: u8, kind: Kind, first_bytes: Option<ByteSet>) -> Self {
+        Self {
+            name,
+            rank,
+            kind,
+            first_bytes,
+        }
+    }
+}
+
 impl Lexer {
     /// Build a lexer from the grammar's terminals (see the module docs for
     /// the recognized terminal shapes).
@@ -109,31 +203,32 @@ impl Lexer {
         for terminal in terminals {
             match classify(&terminal) {
                 Classified::Other => other = Some(terminal),
-                Classified::Any => string_rules.push(Term {
-                    name: terminal,
-                    rank: 5,
-                    kind: Kind::Any,
-                }),
-                Classified::ClassRun(members) => class_runs.push(Term {
-                    name: terminal,
-                    rank: 3,
-                    kind: Kind::Run(members),
-                }),
-                Classified::Negated(members) => negated_classes.push(Term {
-                    name: terminal,
-                    rank: 1,
-                    kind: Kind::Negated(members),
-                }),
-                Classified::Class(members) => char_classes.push(Term {
-                    name: terminal,
-                    rank: 2,
-                    kind: Kind::Class(members),
-                }),
-                Classified::Literal => literals.push(Term {
-                    name: terminal,
-                    rank: 4,
-                    kind: Kind::Literal,
-                }),
+                Classified::Any => string_rules.push(Term::filtered(
+                    terminal,
+                    5,
+                    Kind::Any,
+                    Some(ByteSet::byte(b'"')),
+                )),
+                Classified::ClassRun(members) => {
+                    let set = CharSet::from_members(members);
+                    let bytes = set.first_bytes();
+                    class_runs.push(Term::filtered(terminal, 3, Kind::Run(set), Some(bytes)));
+                }
+                Classified::Negated(members) => negated_classes.push(Term::filtered(
+                    terminal,
+                    1,
+                    Kind::Negated(CharSet::from_members(members)),
+                    None,
+                )),
+                Classified::Class(members) => {
+                    let set = CharSet::from_members(members);
+                    let bytes = set.first_bytes();
+                    char_classes.push(Term::filtered(terminal, 2, Kind::Class(set), Some(bytes)));
+                }
+                Classified::Literal => {
+                    let bytes = terminal.as_bytes().first().copied().map(ByteSet::byte);
+                    literals.push(Term::filtered(terminal, 4, Kind::Literal, bytes));
+                }
             }
         }
 
@@ -230,10 +325,14 @@ impl Lexer {
             return None;
         }
         let ch = char_at(input, i);
+        let byte = input.as_bytes()[i];
         let mut best_index: Option<usize> = None;
         let mut best_end = i;
         let mut best_rank: u8 = 0;
         for (index, term) in self.terms.iter().enumerate() {
+            if term.first_bytes.is_some_and(|set| !set.contains(byte)) {
+                continue;
+            }
             let Some(end) = match_term(term, input, i, limit, ch) else {
                 continue;
             };
@@ -326,14 +425,14 @@ fn match_term(term: &Term, input: &str, i: usize, limit: usize, ch: char) -> Opt
             }
         }
         Kind::Class(members) => {
-            if !members.contains(&ch) {
+            if !members.contains(ch) {
                 return None;
             }
             let end = i + ch.len_utf8();
             (end <= limit).then_some(end)
         }
         Kind::Negated(members) => {
-            if members.contains(&ch) {
+            if members.contains(ch) {
                 return None;
             }
             let end = i + ch.len_utf8();
@@ -342,18 +441,27 @@ fn match_term(term: &Term, input: &str, i: usize, limit: usize, ch: char) -> Opt
     }
 }
 
-fn run_end(input: &str, i: usize, limit: usize, members: &HashSet<char>) -> Option<usize> {
+fn run_end(input: &str, i: usize, limit: usize, members: &CharSet) -> Option<usize> {
     if i >= limit {
         return None;
     }
     let ch = char_at(input, i);
-    if !members.contains(&ch) {
+    if !members.contains(ch) {
         return None;
     }
+    let bytes = input.as_bytes();
     let mut end = i + ch.len_utf8();
     while end < limit {
+        let byte = bytes[end];
+        if byte < 0x80 {
+            if !members.ascii.contains(byte) {
+                break;
+            }
+            end += 1;
+            continue;
+        }
         let c = char_at(input, end);
-        if !members.contains(&c) {
+        if !members.contains(c) {
             break;
         }
         end += c.len_utf8();
@@ -420,6 +528,15 @@ fn classify(terminal: &str) -> Classified {
         return Classified::Class(parse_class_members(&inner).unwrap_or_default());
     }
     Classified::Literal
+}
+
+/// The text a literal terminal matches, or `None` when `terminal` is a
+/// class, a class-run, `"any"`, the OTHER fallback, or empty.
+pub(crate) fn literal_needle(terminal: &str) -> Option<&str> {
+    match classify(terminal) {
+        Classified::Literal if !terminal.is_empty() => Some(terminal),
+        _ => None,
+    }
 }
 
 /// Characters that can begin a match of this terminal, or `None` when that
